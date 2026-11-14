@@ -2,20 +2,30 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import * as THREE from "three";
 import { GLTFLoader, type GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
+import { pushAlert } from "./alertState";
 
 // A real, skinned human for NPCs: a Quaternius modular outfit + head + hair on one shared skeleton,
 // animated with the Universal Animation Library clips (idle / walk / run), crossfaded by how fast
-// the NPC is actually moving. It is OPT-IN while it is being tuned: add ?rignpc=1 to the game URL.
-// If anything fails to load or the skeleton does not match the animations, it quietly does nothing
-// and the old blocky character keeps being drawn.
+// the NPC is actually moving. It is ON by default; add ?rignpc=0 to the game URL to switch it off.
+// If anything fails to load or the skeleton does not match the animations, the old blocky character
+// keeps being drawn and a one-time on-screen message says why.
 
 export const RIG_ENABLED =
-  typeof window !== "undefined" && new URLSearchParams(window.location.search).get("rignpc") === "1";
+  typeof window !== "undefined" && new URLSearchParams(window.location.search).get("rignpc") !== "0";
 
 const MODEL_DIR = "/models/characters/";
 const ANIM_DIR = "/models/animations/";
 const ANIM_FILES = ["ual1-a", "ual1-b", "ual2-a", "ual2-b"];
 const RIG_SCALE = 1.1;
+
+let reported = false;
+/** Logs the reason and shows it once on screen, so it can be read on a phone without a console. */
+function report(msg: string) {
+  console.warn("[npcRig]", msg);
+  if (reported) return;
+  reported = true;
+  pushAlert(`NPC model: ${msg}`, "warn");
+}
 
 type Role = "cloth" | "skin" | "hair";
 type Act = "idle" | "walk" | "run";
@@ -99,6 +109,9 @@ function loadClips(): Promise<ClipSet> {
     }
     console.info("[npcRig] animation clips available:", all.map((c) => c.name).join(", "));
     console.info("[npcRig] using:", Object.fromEntries(Object.entries(found).map(([k, v]) => [k, v?.name])));
+    if (!found.idle || !found.walk) {
+      report(`no idle/walk animation found (${all.length} clips: ${all.slice(0, 6).map((c) => c.name).join(", ")})`);
+    }
     return found;
   })();
   return clipPromise;
@@ -152,7 +165,7 @@ async function buildBody(npcId: number, color: string): Promise<Built | null> {
     if ((o as THREE.Bone).isBone) bones.set(o.name, o as THREE.Bone);
   });
   if (bones.size === 0) {
-    console.warn("[npcRig] outfit has no skeleton:", v.parts[0].file);
+    report(`${v.parts[0].file} has no skeleton`);
     return null;
   }
   root.traverse((o) => {
@@ -242,7 +255,11 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string }>
           const clip = clips[act];
           if (!clip) continue;
           if (clipFits(clip, names)) acts[act] = mx.clipAction(clip);
-          else console.warn(`[npcRig] clip "${clip.name}" does not match this skeleton; blocky body stays`);
+          else {
+            report(
+              `animation "${clip.name}" does not match the skeleton (track ${clip.tracks[0]?.name ?? "?"} vs bone ${[...names][1] ?? "?"})`,
+            );
+          }
         }
         if (!acts.idle || !acts.walk) return;
         mixer = mx;
@@ -260,7 +277,7 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string }>
           hit: false,
         };
       } catch (e) {
-        console.warn("[npcRig] could not build an NPC body; blocky body stays", e);
+        report(`could not build an NPC body (${e instanceof Error ? e.message : String(e)})`);
       }
     })();
 
