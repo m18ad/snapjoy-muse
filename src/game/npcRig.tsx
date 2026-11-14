@@ -12,13 +12,16 @@ import type { CharacterRefs } from "./Character";
 // to switch it off. If anything fails to load or the skeleton does not match the animations, the old
 // blocky character keeps being drawn and a message on screen says why.
 
-export const RIG_ENABLED =
-  typeof window !== "undefined" && new URLSearchParams(window.location.search).get("rignpc") !== "0";
+const search = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+
+export const RIG_ENABLED = search ? search.get("rignpc") !== "0" : false;
 
 const MODEL_DIR = "/models/characters/";
 const ANIM_DIR = "/models/animations/";
 const ANIM_FILES = ["ual1-a", "ual1-b", "ual2-a", "ual2-b"];
-const RIG_SCALE = 1.1;
+// How big the real body is drawn. The world is built on a large scale (trees 13-24 m), so the
+// characters are drawn bigger than life-size. Try ?rigscale=1.8 in the URL to compare sizes.
+const RIG_SCALE = Number(search?.get("rigscale")) || 1.6;
 
 let reported = false;
 /** Logs the reason and shows it on screen, so it can be read on a phone without a console. */
