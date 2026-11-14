@@ -17,6 +17,7 @@ import { pilotState, damageHeli, damageCar } from "./vehicleState";
 import { nearestHostile } from "./targets";
 import { carPilot } from "./carState";
 import { CHARACTER_PALETTE } from "./characterAppearance";
+import { RiggedNpc, RIG_ENABLED, type RigHandle } from "./npcRig";
 
 const DETECT_RANGE = 22;
 const NPC_FIRE_RATE = 0.9;
@@ -61,6 +62,7 @@ const _screenV = new THREE.Vector3();
 function NPCUnit({ npc }: { npc: NPCState }) {
   const refs = useRef<CharacterRefs>(null!);
   const proxy = useRef<THREE.Mesh>(null!);
+  const rig = useRef<RigHandle>(null);
   const gang = GANGS[npc.gang];
   const baseColor = useMemo(() => new THREE.Color(gang.color), [gang.color]);
   const hitColor = useMemo(() => new THREE.Color(CHARACTER_PALETTE.drip), []);
@@ -76,6 +78,7 @@ function NPCUnit({ npc }: { npc: NPCState }) {
     if (npc.dead) {
       npc.respawn -= dtc;
       r.root.visible = false;
+      rig.current?.sync(r.root, dtc, false);
       if (proxy.current) proxy.current.visible = false;
       npc.screenVisible = false;
       if (npc.respawn <= 0) {
@@ -90,6 +93,7 @@ function NPCUnit({ npc }: { npc: NPCState }) {
 
     if (npc.boarded) {
       r.root.visible = false;
+      rig.current?.sync(r.root, dtc, false);
       if (proxy.current) proxy.current.visible = false;
       npc.screenVisible = false;
       return;
@@ -246,6 +250,14 @@ function NPCUnit({ npc }: { npc: NPCState }) {
       npc.hitFlash -= dtc;
     }
 
+    // Real skinned body (opt-in with ?rignpc=1): follows the blocky one's root and hides it once ready.
+    const rg = rig.current;
+    if (rg) {
+      const on = rg.ready();
+      if (r.body) r.body.visible = !on;
+      rg.sync(r.root, dtc, npc.hitFlash > 0);
+    }
+
     const isAlly = npc.gang === PLAYER_GANG;
     if (marker.current) {
       marker.current.visible = isAlly && lvl < 2;
@@ -267,6 +279,7 @@ function NPCUnit({ npc }: { npc: NPCState }) {
   return (
     <group>
       <Character variant={characterVariant(npc.id)} monster={hasMonsterEyes(npc.id, npc.gang)} ref={refs} color={gang.color} accent={gang.accent} />
+      {RIG_ENABLED && <RiggedNpc ref={rig} npcId={npc.id} color={gang.color} />}
       <mesh ref={proxy} geometry={PROXY_GEO} material={solidMaterial(gang.color)} visible={false} scale={1.15} />
       <mesh ref={marker} position={[0, 2.4, 0]} visible={false}>
         <coneGeometry args={[0.18, 0.35, 4]} />
