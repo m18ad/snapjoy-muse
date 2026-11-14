@@ -1,14 +1,16 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, type RefObject } from "react";
+import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { GLTFLoader, type GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { pushAlert } from "./alertState";
+import type { CharacterRefs } from "./Character";
 
-// A real, skinned human for NPCs: a Quaternius modular outfit + head + hair on one shared skeleton,
-// animated with the Universal Animation Library clips (idle / walk / run), crossfaded by how fast
-// the NPC is actually moving. It is ON by default; add ?rignpc=0 to the game URL to switch it off.
-// If anything fails to load or the skeleton does not match the animations, the old blocky character
-// keeps being drawn and a one-time on-screen message says why.
+// A real, skinned human for NPCs and the player: a Quaternius modular outfit + head + hair on one
+// shared skeleton, animated with the Universal Animation Library clips (idle / walk / run), crossfaded
+// by how fast the character is actually moving. It is ON by default; add ?rignpc=0 to the game URL
+// to switch it off. If anything fails to load or the skeleton does not match the animations, the old
+// blocky character keeps being drawn and a message on screen says why.
 
 export const RIG_ENABLED =
   typeof window !== "undefined" && new URLSearchParams(window.location.search).get("rignpc") !== "0";
@@ -19,13 +21,32 @@ const ANIM_FILES = ["ual1-a", "ual1-b", "ual2-a", "ual2-b"];
 const RIG_SCALE = 1.1;
 
 let reported = false;
-/** Logs the reason and shows it once on screen, so it can be read on a phone without a console. */
+/** Logs the reason and shows it on screen, so it can be read on a phone without a console. */
 function report(msg: string) {
   console.warn("[npcRig]", msg);
   if (reported) return;
   reported = true;
-  pushAlert(`NPC model: ${msg}`, "warn");
+  pushAlert(`Character model: ${msg}`, "warn", 20);
 }
+
+let okShown = false;
+function reportOk() {
+  if (okShown) return;
+  okShown = true;
+  pushAlert("Real character models loaded", "info", 6);
+}
+
+/** How movement speed (metres per second) maps to idle / walk / run and the animation speed. */
+export type RigTuning = {
+  idleBelow: number;
+  runAt: number;
+  walkRef: number;
+  runRef: number;
+  maxScale: number;
+  teleport: number;
+};
+const NPC_TUNING: RigTuning = { idleBelow: 0.35, runAt: 2.6, walkRef: 1.5, runRef: 4.2, maxScale: 1.5, teleport: 14 };
+export const PLAYER_TUNING: RigTuning = { idleBelow: 0.5, runAt: 10, walkRef: 4.5, runRef: 9, maxScale: 2, teleport: 40 };
 
 type Role = "cloth" | "skin" | "hair";
 type Act = "idle" | "walk" | "run";
@@ -56,7 +77,7 @@ function variantFor(id: number): Variant {
   };
 }
 
-// ---- Loading (cached, shared by every NPC) ----------------------------------------------
+// ---- Loading (cached, shared by every character) -------------------------------------------
 const gltfCache = new Map<string, Promise<GLTF>>();
 function loadGltf(url: string): Promise<GLTF> {
   let p = gltfCache.get(url);
@@ -228,12 +249,14 @@ type State = {
 
 const FLASH = new THREE.Color("#ff3b3b");
 
-export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string }>(function RiggedNpc(
-  { npcId, color },
+export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; tuning?: RigTuning }>(function RiggedNpc(
+  { npcId, color, tuning },
   ref,
 ) {
   const group = useRef<THREE.Group>(null);
   const state = useRef<State | null>(null);
+  const tune = useRef<RigTuning>(tuning ?? NPC_TUNING);
+  tune.current = tuning ?? NPC_TUNING;
 
   useEffect(() => {
     let cancelled = false;
@@ -276,8 +299,9 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string }>
           hasLast: false,
           hit: false,
         };
+        reportOk();
       } catch (e) {
-        report(`could not build an NPC body (${e instanceof Error ? e.message : String(e)})`);
+        report(`could not build a character body (${e instanceof Error ? e.message : String(e)})`);
       }
     })();
 
@@ -311,19 +335,20 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string }>
         }
         g.position.copy(root.position);
         g.rotation.y = root.rotation.y;
+        const t = tune.current;
 
         // How fast is it really moving? That picks idle / walk / run.
         const step = Math.max(dt, 0.001);
         if (s.hasLast) {
           let v = Math.hypot(root.position.x - s.lx, root.position.z - s.lz) / step;
-          if (v > 14) v = 0; // a jump (respawn, level-of-detail switch), not real movement
+          if (v > t.teleport) v = 0; // a jump (respawn, level-of-detail switch), not real movement
           s.speed += (v - s.speed) * Math.min(1, step * 8);
         }
         s.lx = root.position.x;
         s.lz = root.position.z;
         s.hasLast = true;
 
-        const next: Act = s.speed < 0.35 ? "idle" : s.speed < 2.6 ? "walk" : "run";
+        const next: Act = s.speed < t.idleBelow ? "idle" : s.speed < t.runAt ? "walk" : "run";
         const target = s.acts[next] ?? s.acts.walk ?? s.acts.idle;
         if (target && target !== s.current) {
           target.reset().fadeIn(0.2).play();
@@ -333,16 +358,16 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string }>
         if (s.current) {
           s.current.timeScale =
             next === "walk"
-              ? Math.min(1.5, Math.max(0.6, s.speed / 1.5))
+              ? Math.min(t.maxScale, Math.max(0.6, s.speed / t.walkRef))
               : next === "run"
-                ? Math.min(1.4, Math.max(0.7, s.speed / 4.2))
+                ? Math.min(t.maxScale, Math.max(0.7, s.speed / t.runRef))
                 : 1;
         }
         s.mixer.update(dt);
 
         if (hit !== s.hit) {
           s.hit = hit;
-          for (const t of s.built.tints) t.mat.color.copy(hit ? FLASH : t.base);
+          for (const tint of s.built.tints) tint.mat.color.copy(hit ? FLASH : tint.base);
         }
       },
     }),
@@ -351,3 +376,50 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string }>
 
   return <group ref={group} visible={false} scale={RIG_SCALE} />;
 });
+
+/** Hides the blocky body's meshes, but not anything under `keep` (the weapon the player holds). */
+function hideBlocky(node: THREE.Object3D, keep: Set<THREE.Object3D>) {
+  for (const c of node.children) {
+    if (keep.has(c)) continue;
+    if ((c as THREE.Mesh).isMesh) c.visible = false;
+    hideBlocky(c, keep);
+  }
+}
+
+/**
+ * Gives an existing blocky Character (the player) a real body. It follows the blocky character's
+ * root every frame, so all the existing movement and aiming code keeps working unchanged. The held
+ * weapon stays on the blocky right arm, which is hidden.
+ */
+export function RigFollow({
+  target,
+  npcId,
+  color,
+  tuning,
+}: {
+  target: RefObject<CharacterRefs>;
+  npcId: number;
+  color: string;
+  tuning?: RigTuning;
+}) {
+  const rig = useRef<RigHandle>(null);
+  const hidden = useRef(false);
+  useFrame((_, dt) => {
+    const r = target.current;
+    const rg = rig.current;
+    if (!r || !r.root || !rg) return;
+    if (rg.ready() && !hidden.current) {
+      hidden.current = true;
+      if (r.body) {
+        const keep = new Set<THREE.Object3D>();
+        r.armR?.children.forEach((c) => {
+          if (c.type === "Group") keep.add(c);
+        });
+        hideBlocky(r.body, keep);
+      }
+    }
+    rg.sync(r.root, Math.min(dt, 0.05), false);
+  });
+  if (!RIG_ENABLED) return null;
+  return <RiggedNpc ref={rig} npcId={npcId} color={color} tuning={tuning} />;
+}

@@ -2,6 +2,7 @@ import { useFrame, useThree } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import { Character, type CharacterRefs } from "./Character";
+import { RigFollow, PLAYER_TUNING } from "./npcRig";
 import {
   playFootstep,
   startEngine, updateEngine, stopEngine,
@@ -54,6 +55,7 @@ const RUN_SPEED = 14;
 const AIM_SPEED = 4.5;
 const RESPAWN_OFFSET = 14; // clears the 16-wide HQ building with real margin
 const STUCK_SECONDS = 2.5; // pushing without moving this long triggers the unstick
+const PLAYER_RIG_ID = 2; // which body the player gets (male, light skin)
 
 function boardNearbyFollowers(x: number, z: number) {
   for (const n of NPCS) {
@@ -592,11 +594,14 @@ export function Player() {
   });
 
   return (
-    <Character
-      ref={refs}
-      color={gang.color}
-      accent={gang.accent}
-      showWeaponSlot={weaponNode}
-    />
+    <>
+      <Character
+        ref={refs}
+        color={gang.color}
+        accent={gang.accent}
+        showWeaponSlot={weaponNode}
+      />
+      <RigFollow target={refs} npcId={PLAYER_RIG_ID} color={gang.color} tuning={PLAYER_TUNING} />
+    </>
   );
 }
