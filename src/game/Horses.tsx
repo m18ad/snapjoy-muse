@@ -13,9 +13,13 @@ import { pilotState } from "./vehicleState";
 import { resolveCollision } from "./worldData";
 
 // Horses: the real horse model with its own animations. They wander the meadow near you, and you
-// can ride one. Each horse has a tall golden beam above it so it is easy to spot from far away. Walk
-// up to a horse and tap MOUNT HORSE (or press H). A label at the bottom of the screen points to the
-// nearest horse. Horses that are left far behind come back near you. ?horses=0 switches them off.
+// can ride one. Walk up to a horse and tap MOUNT HORSE (or press H). A label at the bottom of the
+// screen points to the nearest horse. Horses that are left far behind come back near you.
+// ?horses=0 switches them off.
+//
+// Movement: horses lean to match the slope of the ground (nose up on a hill, tilt on a side slope).
+// If the model has walk / run animations they are used; if it has none, the body bobs and rocks with
+// every stride and the legs are swung by hand when the leg bones can be recognised.
 
 const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
 const HORSES_ENABLED = params ? params.get("horses") !== "0" : false;
@@ -28,14 +32,15 @@ const WALK_ANIM_REF = 3.6; // the speed at which the walk animation plays at nor
 const RUN_ANIM_REF = 14; // the speed at which the run animation plays at normal rate
 const SHOW_DIST = 260;
 const ANIM_DIST = 140;
-const BEAM_DIST = 700;
-const BEAM_HEIGHT = 40;
 const MOUNT_RADIUS = 9;
 const RIDE_SPEED_MULT = 1.8;
 const COME_BACK_DIST = 110; // a horse further than this from you is brought back near you
 // Where the rider sits: the saddle is a bit over half the horse's height, and a rider's hips are
 // about half of their own height above their feet.
 const RIDER_LIFT = Math.max(0, 0.58 * HORSE_HEIGHT - 0.9 * CHAR_SCALE);
+// Body size used to measure the slope under a horse.
+const HALF_LEN = HORSE_HEIGHT * 0.55;
+const HALF_WID = HORSE_HEIGHT * 0.22;
 
 type Asset = {
   scene: THREE.Group;
@@ -109,14 +114,50 @@ function loadHorse(): Promise<Asset | null> {
   return assetPromise;
 }
 
+// ---- Hand-made leg swing, used only when the model has no walk animation --------------------
+type Leg = { bone: THREE.Object3D; base: THREE.Quaternion; phase: number };
+const LEG_TOP = /(front|fore|hind|back|rear)/;
+const LEG_PART = /(leg|thigh|upper|shoulder|femur|humerus)/;
+const LEG_LOWER = /(lower|foot|hoof|toe|calf|shin|knee|hock|pastern|fetlock|cannon|end|tip)/;
+const LEFT = /(left|[._]l([._]|$)|^l[._])/;
+const RIGHT = /(right|[._]r([._]|$)|^r[._])/;
+
+/** Finds the top bone of each of the four legs by name. Returns nothing unless it is unambiguous. */
+function findLegs(root: THREE.Object3D): Leg[] {
+  const found: { bone: THREE.Object3D; front: boolean; left: boolean }[] = [];
+  root.traverse((o) => {
+    if (!(o as THREE.Bone).isBone) return;
+    const n = o.name.toLowerCase();
+    if (!LEG_TOP.test(n) || !LEG_PART.test(n) || LEG_LOWER.test(n)) return;
+    const left = LEFT.test(n);
+    const right = RIGHT.test(n);
+    if (left === right) return;
+    const p = o.parent?.name.toLowerCase() ?? "";
+    if (LEG_TOP.test(p) && LEG_PART.test(p) && !LEG_LOWER.test(p)) return; // not the top of the chain
+    found.push({ bone: o, front: /(front|fore)/.test(n), left });
+  });
+  if (found.length !== 4) return [];
+  const combos = new Set(found.map((f) => `${f.front}-${f.left}`));
+  if (combos.size !== 4) return [];
+  // Diagonal pairs move together: front-left with hind-right, front-right with hind-left.
+  return found.map((f) => ({
+    bone: f.bone,
+    base: f.bone.quaternion.clone(),
+    phase: f.front === f.left ? 0 : Math.PI,
+  }));
+}
+
 type Unit = {
   outer: THREE.Group;
-  beam: THREE.Mesh;
   mixer: THREE.AnimationMixer | null;
   idle: THREE.AnimationAction | null;
   walk: THREE.AnimationAction | null;
   run: THREE.AnimationAction | null;
   cur: THREE.AnimationAction | null;
+  legs: Leg[];
+  gait: number;
+  pitch: number;
+  roll: number;
   x: number;
   z: number;
   lx: number;
@@ -132,6 +173,8 @@ type Unit = {
 };
 
 const ARROWS = ["\u2191", "\u2197", "\u2192", "\u2198", "\u2193", "\u2199", "\u2190", "\u2196"];
+const LEG_AXIS = new THREE.Vector3(1, 0, 0);
+const _q = new THREE.Quaternion();
 
 export function Horses() {
   const root = useRef<THREE.Group>(null);
@@ -267,20 +310,21 @@ export function Horses() {
 
     loadHorse().then((asset) => {
       if (cancelled || !asset || !root.current) return;
-      const idleClip =
-        asset.clips.find((c) => /idle|stand/i.test(c.name)) ?? asset.clips.find((c) => /graze|eat/i.test(c.name)) ?? null;
-      const walkClip =
-        asset.clips.find((c) => /walk/i.test(c.name)) ?? asset.clips.find((c) => /trot|run|gallop|canter/i.test(c.name)) ?? null;
-      const runClip = asset.clips.find((c) => /gallop|run|canter/i.test(c.name) && c !== walkClip) ?? null;
+      const clips = asset.clips;
+      const idleClip = clips.find((c) => /idle|stand|rest|breath/i.test(c.name)) ?? null;
+      const trotClip = clips.find((c) => /trot/i.test(c.name)) ?? null;
+      let walkClip = clips.find((c) => /walk/i.test(c.name)) ?? trotClip;
+      let runClip = clips.find((c) => /gallop|run|canter|sprint/i.test(c.name)) ?? null;
+      // Unnamed animations: use the first one that is not the idle as the walk.
+      if (!walkClip) walkClip = clips.find((c) => c !== idleClip && c !== runClip) ?? null;
+      if (!runClip && trotClip && trotClip !== walkClip) runClip = trotClip;
       pushAlert(
-        `Horses ready (${asset.clips.length} animations: ${asset.clips.slice(0, 6).map((c) => c.name).join(", ") || "none"})`,
+        `Horses ready (${clips.length} animations: ${clips.slice(0, 6).map((c) => c.name).join(", ") || "none"})`,
         "info",
         10,
       );
 
       const scale = HORSE_HEIGHT / asset.height;
-      const beamGeo = new THREE.CylinderGeometry(0.35, 0.35, BEAM_HEIGHT, 8, 1, true);
-      beamGeo.translate(0, BEAM_HEIGHT / 2, 0);
       for (let i = 0; i < HORSE_COUNT; i++) {
         const model = cloneSkeleton(asset.scene);
         model.position.set(-asset.cx, -asset.minY, -asset.cz);
@@ -297,24 +341,9 @@ export function Horses() {
         inner.add(model);
         const outer = new THREE.Group();
         outer.scale.setScalar(scale);
+        outer.rotation.order = "YXZ";
         outer.add(inner);
         root.current.add(outer);
-
-        // A tall golden beam so the horse can be spotted from far away.
-        const beam = new THREE.Mesh(
-          beamGeo,
-          new THREE.MeshBasicMaterial({
-            color: "#ffd36a",
-            transparent: true,
-            opacity: 0.55,
-            depthWrite: false,
-            side: THREE.DoubleSide,
-            fog: false,
-            toneMapped: false,
-          }),
-        );
-        beam.frustumCulled = false;
-        root.current.add(beam);
 
         let mixer: THREE.AnimationMixer | null = null;
         let idle: THREE.AnimationAction | null = null;
@@ -329,14 +358,18 @@ export function Horses() {
           first?.play();
           if (first) first.time = Math.random() * first.getClip().duration;
         }
+        const legs = walkClip ? [] : findLegs(model);
         const unit: Unit = {
           outer,
-          beam,
           mixer,
           idle,
           walk,
           run,
           cur: idle ?? walk,
+          legs,
+          gait: Math.random() * 6,
+          pitch: 0,
+          roll: 0,
           x: 0,
           z: 0,
           lx: 0,
@@ -371,8 +404,6 @@ export function Horses() {
       for (const u of made) {
         u.mixer?.stopAllAction();
         u.outer.removeFromParent();
-        u.beam.removeFromParent();
-        (u.beam.material as THREE.Material).dispose();
       }
       units.current = [];
     };
@@ -386,11 +417,6 @@ export function Horses() {
     for (const u of units.current) {
       const carried = u === mounted;
       const d = Math.hypot(u.x - camera.position.x, u.z - camera.position.z);
-
-      // The beam shows from far away, but not on the horse you are riding.
-      u.beam.visible = !carried && d < BEAM_DIST;
-      if (u.beam.visible) u.beam.position.set(u.x, groundHeight(u.x, u.z), u.z);
-
       u.outer.visible = carried || d < SHOW_DIST;
       if (!carried && d >= SHOW_DIST) continue;
 
@@ -400,8 +426,6 @@ export function Horses() {
         u.x = playerState.pos.x;
         u.z = playerState.pos.z;
         u.heading = mountState.yaw;
-        u.outer.position.set(u.x, playerState.y, u.z);
-        u.outer.rotation.y = u.heading;
         const v = Math.hypot(u.x - u.lx, u.z - u.lz) / Math.max(step, 0.001);
         u.speed += ((v > 60 ? 0 : v) - u.speed) * Math.min(1, step * 8);
       } else {
@@ -445,17 +469,51 @@ export function Horses() {
             }
           }
         }
-        u.outer.position.set(u.x, groundHeight(u.x, u.z), u.z);
-        u.outer.rotation.y = u.heading;
         u.speed = walking ? WALK_SPEED : 0;
       }
       u.lx = u.x;
       u.lz = u.z;
 
+      const moving = u.speed > 0.6;
+      const fast = u.speed > 9;
+
+      // ---- Stride: with no walk animation, the body bobs and rocks and the legs swing by hand ----
+      let bob = 0;
+      let rock = 0;
+      let sway = 0;
+      if (!u.walk && moving) {
+        u.gait += (step * u.speed) / (HORSE_HEIGHT * 0.45);
+        bob = Math.abs(Math.sin(u.gait)) * HORSE_HEIGHT * (fast ? 0.05 : 0.025);
+        rock = Math.sin(u.gait) * (fast ? 0.07 : 0.03);
+        sway = Math.sin(u.gait * 0.5) * (fast ? 0.04 : 0.025);
+      }
+      if (u.legs.length > 0) {
+        const amp = moving ? (fast ? 0.85 : 0.45) : 0;
+        for (const leg of u.legs) {
+          _q.setFromAxisAngle(LEG_AXIS, Math.sin(u.gait + leg.phase) * amp);
+          leg.bone.quaternion.copy(leg.base).multiply(_q);
+        }
+      }
+
+      // ---- Lean with the ground: nose up on a hill, tilt on a side slope ----
+      const sh = Math.sin(u.heading);
+      const ch = Math.cos(u.heading);
+      const gy = carried ? playerState.y : groundHeight(u.x, u.z);
+      const hF = groundHeight(u.x + sh * HALF_LEN, u.z + ch * HALF_LEN);
+      const hB = groundHeight(u.x - sh * HALF_LEN, u.z - ch * HALF_LEN);
+      const hL = groundHeight(u.x + ch * HALF_WID, u.z - sh * HALF_WID);
+      const hR = groundHeight(u.x - ch * HALF_WID, u.z + sh * HALF_WID);
+      const wantPitch = THREE.MathUtils.clamp(-Math.atan2(hF - hB, HALF_LEN * 2), -0.5, 0.5);
+      const wantRoll = THREE.MathUtils.clamp(Math.atan2(hL - hR, HALF_WID * 2), -0.4, 0.4);
+      const ease = Math.min(1, step * 6);
+      u.pitch += (wantPitch - u.pitch) * ease;
+      u.roll += (wantRoll - u.roll) * ease;
+
+      u.outer.position.set(u.x, gy + bob, u.z);
+      u.outer.rotation.set(u.pitch + rock, u.heading, u.roll + sway, "YXZ");
+
       if (u.mixer && d < ANIM_DIST) {
         // Idle when still, walk when strolling, run (or a fast walk) when ridden hard.
-        const fast = u.speed > 9;
-        const moving = u.speed > 0.6;
         const next = !moving ? u.idle ?? u.walk : fast ? u.run ?? u.walk ?? u.idle : u.walk ?? u.idle;
         if (next && next !== u.cur) {
           next.reset().fadeIn(0.3).play();
@@ -466,6 +524,8 @@ export function Horses() {
           u.cur.timeScale = THREE.MathUtils.clamp(u.speed / WALK_ANIM_REF, 0.5, 2.5);
         } else if (u.cur === u.run && moving) {
           u.cur.timeScale = THREE.MathUtils.clamp(u.speed / RUN_ANIM_REF, 0.6, 2);
+        } else if (u.cur === u.walk) {
+          u.cur.timeScale = 0; // no idle animation: hold the pose instead of walking on the spot
         } else if (u.cur) {
           u.cur.timeScale = 1;
         }
@@ -511,7 +571,7 @@ export function Horses() {
       const rightOf = -f.z * tx + f.x * tz;
       const ang = Math.atan2(rightOf, ahead);
       const arrow = ARROWS[(Math.round(ang / (Math.PI / 4)) + 8) % 8];
-      el.label.textContent = `Nearest horse: ${Math.round(n.dist)} m ${arrow}  (follow the golden beam)`;
+      el.label.textContent = `Nearest horse: ${Math.round(n.dist)} m ${arrow}`;
       el.label.style.display = "block";
     }
   });
