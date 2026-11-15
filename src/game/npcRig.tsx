@@ -21,7 +21,7 @@ const ANIM_DIR = "/models/animations/";
 const ANIM_FILES = ["ual1-a", "ual1-b", "ual2-a", "ual2-b"];
 // How big the real body is drawn. The world is built on a large scale (trees 13-24 m), so the
 // characters are drawn bigger than life-size. Try ?rigscale=1.8 in the URL to compare sizes.
-const RIG_SCALE = Number(search?.get("rigscale")) || 1.6;
+const RIG_SCALE = Number(search?.get("rigscale")) || 2.0;
 
 let reported = false;
 /** Logs the reason and shows it on screen, so it can be read on a phone without a console. */
