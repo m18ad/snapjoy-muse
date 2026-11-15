@@ -3,6 +3,7 @@ import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import { Character, type CharacterRefs } from "./Character";
 import { RigFollow, PLAYER_TUNING } from "./npcRig";
+import { mountState } from "./mountState";
 import {
   playFootstep,
   startEngine, updateEngine, stopEngine,
@@ -91,7 +92,7 @@ function handleDeathAt(x: number, z: number, set: (x: number, y: number, z: numb
   spendMoney(tax); // shown at once
   void reportDeath(recent); // the server takes the tax and pays your killer
   if (tax > 0) {
-    pushAlert(recent ? `You fell. ◈ ${tax} taken; half goes to your killer.` : `You fell. ◈ ${tax} lost.`, "warn");
+    pushAlert(recent ? `You fell. \u25c8 ${tax} taken; half goes to your killer.` : `You fell. \u25c8 ${tax} lost.`, "warn");
   }
   return true;
 }
@@ -413,7 +414,8 @@ export function Player() {
     const running = input.run || input.keys.has("ShiftLeft");
     const aiming = input.aim;
     const holding = aiming || input.fire;
-    const speedBase = aiming ? AIM_SPEED : running ? RUN_SPEED : WALK_SPEED;
+    // Riding a horse makes you faster (mountState is set by the horses).
+    const speedBase = (aiming ? AIM_SPEED : running ? RUN_SPEED : WALK_SPEED) * (mountState.mounted ? mountState.speedMult : 1);
     const speed = speedBase * mag;
 
     recoil.current = Math.max(0, recoil.current - dtc * RECOIL_DECAY);
@@ -529,7 +531,7 @@ export function Player() {
     const step = running ? 13 : 8;
     const prevPhase = walkPhase.current;
     walkPhase.current += dtc * step * (mag > 0.05 && !holding ? 1 : 0);
-    if (mag > 0.05 && !holding && grounded.current && Math.floor(walkPhase.current / Math.PI) !== Math.floor(prevPhase / Math.PI)) {
+    if (mag > 0.05 && !holding && grounded.current && !mountState.mounted && Math.floor(walkPhase.current / Math.PI) !== Math.floor(prevPhase / Math.PI)) {
       playFootstep(running);
     }
     const swing = Math.sin(walkPhase.current) * (running ? 1.0 : 0.65) * mag;
@@ -544,9 +546,10 @@ export function Player() {
     }
     if (r.head) r.head.rotation.x = THREE.MathUtils.lerp(r.head.rotation.x, pitch.current * 0.4, 0.2);
 
-    const targetDist = aiming ? 2.6 : 5.8;
+    // On a horse the camera sits higher and further back so rider and horse both fit.
+    const targetDist = (aiming ? 2.6 : 5.8) + mountState.camBack;
     const shoulderX = aiming ? 0.7 : 0;
-    const camHeight = 2.0 + Math.sin(pitch.current) * 2.4;
+    const camHeight = 2.0 + Math.sin(pitch.current) * 2.4 + mountState.camUp;
     const back = new THREE.Vector3(Math.sin(yaw.current), 0, Math.cos(yaw.current));
     const sideV = new THREE.Vector3(-back.z, 0, back.x);
     const targetOffset = new THREE.Vector3(
@@ -578,7 +581,7 @@ export function Player() {
     camera.position.set(camX, camY + camLift.current, camZ);
     camera.lookAt(
       p.x + sideV.x * shoulderX * 0.6,
-      p.y + 1.5 + recoil.current * 0.35,
+      p.y + 1.5 + mountState.camUp * 0.6 + recoil.current * 0.35,
       p.z + sideV.z * shoulderX * 0.6,
     );
 

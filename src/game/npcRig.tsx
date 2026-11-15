@@ -4,6 +4,7 @@ import * as THREE from "three";
 import { GLTFLoader, type GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { pushAlert } from "./alertState";
+import { mountState } from "./mountState";
 import type { CharacterRefs } from "./Character";
 
 // A real, skinned human for NPCs and the player: a Quaternius modular outfit + head + hair on one
@@ -231,11 +232,18 @@ async function buildBody(npcId: number, color: string): Promise<Built | null> {
 }
 
 // ---- The component -----------------------------------------------------------------------
+export type RigSyncOptions = {
+  /** Raise the body above the ground (sitting on a horse). */
+  lift?: number;
+  /** Hold the idle pose whatever the speed (riding). */
+  idle?: boolean;
+};
+
 export type RigHandle = {
   /** True once the real body is loaded and animating; the blocky one should then be hidden. */
   ready: () => boolean;
   /** Follow the blocky character's root (position, facing, visibility) and advance the animation. */
-  sync: (root: THREE.Object3D, dt: number, hit: boolean) => void;
+  sync: (root: THREE.Object3D, dt: number, hit: boolean, opt?: RigSyncOptions) => void;
 };
 
 type State = {
@@ -323,7 +331,7 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
     ref,
     () => ({
       ready: () => state.current !== null,
-      sync: (root, dt, hit) => {
+      sync: (root, dt, hit, opt) => {
         const g = group.current;
         const s = state.current;
         if (!g) return;
@@ -337,6 +345,7 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
           return;
         }
         g.position.copy(root.position);
+        if (opt?.lift) g.position.y += opt.lift;
         g.rotation.y = root.rotation.y;
         const t = tune.current;
 
@@ -351,7 +360,7 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
         s.lz = root.position.z;
         s.hasLast = true;
 
-        const next: Act = s.speed < t.idleBelow ? "idle" : s.speed < t.runAt ? "walk" : "run";
+        const next: Act = opt?.idle ? "idle" : s.speed < t.idleBelow ? "idle" : s.speed < t.runAt ? "walk" : "run";
         const target = s.acts[next] ?? s.acts.walk ?? s.acts.idle;
         if (target && target !== s.current) {
           target.reset().fadeIn(0.2).play();
@@ -359,8 +368,9 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
           s.current = target;
         }
         if (s.current) {
-          s.current.timeScale =
-            next === "walk"
+          s.current.timeScale = opt?.idle
+            ? 1
+            : next === "walk"
               ? Math.min(t.maxScale, Math.max(0.6, s.speed / t.walkRef))
               : next === "run"
                 ? Math.min(t.maxScale, Math.max(0.7, s.speed / t.runRef))
@@ -421,7 +431,8 @@ export function RigFollow({
         hideBlocky(r.body, keep);
       }
     }
-    rg.sync(r.root, Math.min(dt, 0.05), false);
+    mountState.yaw = r.root.rotation.y;
+    rg.sync(r.root, Math.min(dt, 0.05), false, mountState.mounted ? { lift: mountState.lift, idle: true } : undefined);
   });
   if (!RIG_ENABLED) return null;
   return <RiggedNpc ref={rig} npcId={npcId} color={color} tuning={tuning} />;
