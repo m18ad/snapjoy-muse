@@ -32,12 +32,14 @@ export function Atmosphere() {
 
       <SkyIslands />
 
+      {/* The horses stay even when the graphics are lowered: they are part of getting around. */}
+      <Horses />
+
       {!low && (
         <>
           <Particles />
           <CloudShadows />
           <Birds />
-          <Horses />
         </>
       )}
     </>

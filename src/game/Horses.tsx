@@ -12,9 +12,10 @@ import { findFreeSpot } from "./unstick";
 import { pilotState } from "./vehicleState";
 import { resolveCollision } from "./worldData";
 
-// Horses: the real horse model with its own animations. They wander the meadow near where you
-// start, and you can ride one. Walk up to a horse and tap MOUNT HORSE (or press H). A label at the
-// bottom of the screen points to the nearest horse. Add ?horses=0 to the URL to switch them off.
+// Horses: the real horse model with its own animations. They wander the meadow near you, and you
+// can ride one. Each horse has a tall golden beam above it so it is easy to spot from far away. Walk
+// up to a horse and tap MOUNT HORSE (or press H). A label at the bottom of the screen points to the
+// nearest horse. Horses that are left far behind come back near you. ?horses=0 switches them off.
 
 const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
 const HORSES_ENABLED = params ? params.get("horses") !== "0" : false;
@@ -27,8 +28,11 @@ const WALK_ANIM_REF = 3.6; // the speed at which the walk animation plays at nor
 const RUN_ANIM_REF = 14; // the speed at which the run animation plays at normal rate
 const SHOW_DIST = 260;
 const ANIM_DIST = 140;
+const BEAM_DIST = 700;
+const BEAM_HEIGHT = 40;
 const MOUNT_RADIUS = 9;
 const RIDE_SPEED_MULT = 1.8;
+const COME_BACK_DIST = 110; // a horse further than this from you is brought back near you
 // Where the rider sits: the saddle is a bit over half the horse's height, and a rider's hips are
 // about half of their own height above their feet.
 const RIDER_LIFT = Math.max(0, 0.58 * HORSE_HEIGHT - 0.9 * CHAR_SCALE);
@@ -107,6 +111,7 @@ function loadHorse(): Promise<Asset | null> {
 
 type Unit = {
   outer: THREE.Group;
+  beam: THREE.Mesh;
   mixer: THREE.AnimationMixer | null;
   idle: THREE.AnimationAction | null;
   walk: THREE.AnimationAction | null;
@@ -145,6 +150,23 @@ export function Horses() {
       if (d < bestD) { bestD = d; best = u; }
     }
     return best ? { unit: best, dist: bestD } : null;
+  }
+
+  /** Puts a horse on free ground a short walk from the player. */
+  function bringNear(u: Unit) {
+    const ang = Math.random() * Math.PI * 2;
+    const rad = 22 + Math.random() * 20;
+    const spot = findFreeSpot(playerState.pos.x + Math.cos(ang) * rad, playerState.pos.z + Math.sin(ang) * rad);
+    u.x = spot.x;
+    u.z = spot.z;
+    u.lx = spot.x;
+    u.lz = spot.z;
+    u.hx = spot.x;
+    u.hz = spot.z;
+    u.tx = spot.x;
+    u.tz = spot.z;
+    u.moving = false;
+    u.timer = 2 + Math.random() * 3;
   }
 
   function mount(u: Unit) {
@@ -191,45 +213,52 @@ export function Horses() {
     const made: Unit[] = [];
 
     // ---- On-screen controls: a Mount / Dismount button and a label that points to the nearest horse.
+    // They live inside the game's own screen element so they are drawn above the game.
+    const host = (document.querySelector(".game-viewport") as HTMLElement | null) ?? document.body;
     const button = document.createElement("button");
     Object.assign(button.style, {
-      position: "fixed",
+      position: host === document.body ? "fixed" : "absolute",
       left: "50%",
       bottom: "88px",
       transform: "translateX(-50%)",
-      zIndex: "60",
+      zIndex: "200",
       padding: "14px 22px",
       borderRadius: "14px",
       border: "2px solid #d8ac52",
-      background: "rgba(20,16,10,0.88)",
+      background: "rgba(20,16,10,0.9)",
       color: "#f3e3b0",
       font: "700 15px/1 system-ui, sans-serif",
       letterSpacing: "0.08em",
       display: "none",
       touchAction: "manipulation",
     } as Partial<CSSStyleDeclaration>);
+    const stop = (e: Event) => e.stopPropagation();
     button.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       e.stopPropagation();
       toggle();
     });
+    button.addEventListener("pointerup", stop);
+    button.addEventListener("pointermove", stop);
     const label = document.createElement("div");
     Object.assign(label.style, {
-      position: "fixed",
+      position: host === document.body ? "fixed" : "absolute",
       left: "50%",
       bottom: "150px",
       transform: "translateX(-50%)",
-      zIndex: "60",
-      padding: "6px 12px",
+      zIndex: "200",
+      padding: "8px 14px",
       borderRadius: "10px",
-      background: "rgba(20,16,10,0.7)",
+      background: "rgba(20,16,10,0.78)",
       color: "#f3e3b0",
-      font: "600 13px/1.2 system-ui, sans-serif",
+      font: "700 14px/1.2 system-ui, sans-serif",
       pointerEvents: "none",
-      display: "none",
+      display: "block",
+      whiteSpace: "nowrap",
     } as Partial<CSSStyleDeclaration>);
-    document.body.appendChild(button);
-    document.body.appendChild(label);
+    label.textContent = "Looking for horses...";
+    host.appendChild(button);
+    host.appendChild(label);
     ui.current = { button, label };
     const onKey = (e: KeyboardEvent) => {
       if (e.code === "KeyH" && !e.repeat) toggle();
@@ -250,14 +279,9 @@ export function Horses() {
       );
 
       const scale = HORSE_HEIGHT / asset.height;
-      const cx = playerState.pos.x;
-      const cz = playerState.pos.z;
+      const beamGeo = new THREE.CylinderGeometry(0.35, 0.35, BEAM_HEIGHT, 8, 1, true);
+      beamGeo.translate(0, BEAM_HEIGHT / 2, 0);
       for (let i = 0; i < HORSE_COUNT; i++) {
-        // Close to where you start, so they are easy to find.
-        const ang = (i / HORSE_COUNT) * Math.PI * 2 + Math.random() * 0.8;
-        const rad = 16 + Math.random() * 26;
-        const spot = findFreeSpot(cx + Math.cos(ang) * rad, cz + Math.sin(ang) * rad);
-
         const model = cloneSkeleton(asset.scene);
         model.position.set(-asset.cx, -asset.minY, -asset.cz);
         model.traverse((o) => {
@@ -276,6 +300,22 @@ export function Horses() {
         outer.add(inner);
         root.current.add(outer);
 
+        // A tall golden beam so the horse can be spotted from far away.
+        const beam = new THREE.Mesh(
+          beamGeo,
+          new THREE.MeshBasicMaterial({
+            color: "#ffd36a",
+            transparent: true,
+            opacity: 0.55,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+            fog: false,
+            toneMapped: false,
+          }),
+        );
+        beam.frustumCulled = false;
+        root.current.add(beam);
+
         let mixer: THREE.AnimationMixer | null = null;
         let idle: THREE.AnimationAction | null = null;
         let walk: THREE.AnimationAction | null = null;
@@ -289,26 +329,34 @@ export function Horses() {
           first?.play();
           if (first) first.time = Math.random() * first.getClip().duration;
         }
-        made.push({
+        const unit: Unit = {
           outer,
+          beam,
           mixer,
           idle,
           walk,
           run,
           cur: idle ?? walk,
-          x: spot.x,
-          z: spot.z,
-          lx: spot.x,
-          lz: spot.z,
+          x: 0,
+          z: 0,
+          lx: 0,
+          lz: 0,
           speed: 0,
           heading: Math.random() * Math.PI * 2,
-          hx: spot.x,
-          hz: spot.z,
-          tx: spot.x,
-          tz: spot.z,
+          hx: 0,
+          hz: 0,
+          tx: 0,
+          tz: 0,
           moving: false,
           timer: Math.random() * 5,
-        });
+        };
+        // Start on free ground close to the player, spread around them.
+        const ang = (i / HORSE_COUNT) * Math.PI * 2 + Math.random() * 0.8;
+        const rad = 16 + Math.random() * 26;
+        const spot = findFreeSpot(playerState.pos.x + Math.cos(ang) * rad, playerState.pos.z + Math.sin(ang) * rad);
+        unit.x = unit.lx = unit.hx = unit.tx = spot.x;
+        unit.z = unit.lz = unit.hz = unit.tz = spot.z;
+        made.push(unit);
       }
       units.current = made;
     });
@@ -323,6 +371,8 @@ export function Horses() {
       for (const u of made) {
         u.mixer?.stopAllAction();
         u.outer.removeFromParent();
+        u.beam.removeFromParent();
+        (u.beam.material as THREE.Material).dispose();
       }
       units.current = [];
     };
@@ -336,6 +386,11 @@ export function Horses() {
     for (const u of units.current) {
       const carried = u === mounted;
       const d = Math.hypot(u.x - camera.position.x, u.z - camera.position.z);
+
+      // The beam shows from far away, but not on the horse you are riding.
+      u.beam.visible = !carried && d < BEAM_DIST;
+      if (u.beam.visible) u.beam.position.set(u.x, groundHeight(u.x, u.z), u.z);
+
       u.outer.visible = carried || d < SHOW_DIST;
       if (!carried && d >= SHOW_DIST) continue;
 
@@ -430,10 +485,15 @@ export function Horses() {
       el.label.style.display = "none";
       return;
     }
-    const n = busy ? null : nearestHorse();
+    let n = busy ? null : nearestHorse();
+    // Horses that were left far behind come back near the player, so there is always one to find.
+    if (n && n.dist > COME_BACK_DIST) {
+      bringNear(n.unit);
+      n = nearestHorse();
+    }
     if (!n) {
       el.button.style.display = "none";
-      el.label.style.display = "none";
+      el.label.style.display = units.current.length === 0 && !busy ? "block" : "none";
       return;
     }
     if (n.dist < MOUNT_RADIUS) {
@@ -451,7 +511,7 @@ export function Horses() {
       const rightOf = -f.z * tx + f.x * tz;
       const ang = Math.atan2(rightOf, ahead);
       const arrow = ARROWS[(Math.round(ang / (Math.PI / 4)) + 8) % 8];
-      el.label.textContent = `Nearest horse: ${Math.round(n.dist)} m ${arrow}`;
+      el.label.textContent = `Nearest horse: ${Math.round(n.dist)} m ${arrow}  (follow the golden beam)`;
       el.label.style.display = "block";
     }
   });
