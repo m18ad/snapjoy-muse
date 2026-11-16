@@ -1,36 +1,33 @@
 import { useFrame, useThree } from "@react-three/fiber";
-import { useEffect, useMemo, useRef } from "react";
+import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import {
-  createSunState,
-  daylightPhase,
+  CYCLE_SECONDS,
   daylightWeight,
   MIN_AMBIENT_INTENSITY,
   MIN_HEMISPHERE_INTENSITY,
   MIN_SUN_INTENSITY,
   MAX_SUN_INTENSITY,
-  updateSun,
 } from "./dayNightConfig";
 import { PLAYER_GANG } from "./gangs";
 import { playerState } from "./playerState";
-import { quality, SHADOW_MAP_SIZE } from "./quality";
-import { groundHeight } from "./terrain";
 import { territoryState } from "./territoryState";
 import { districtAt } from "./worldData";
+import { weather } from "./medieval/weatherState";
 
 // Extra light on top of the config values. Less flat ambient and a stronger sun give the land form
 // and shadow (hillsides, tree trunks) like the reference art, instead of a bright washed-out look.
-const BOOST_AMBIENT = 0.08;
-const BOOST_HEMI = 0.16;
+const BOOST_AMBIENT = 0.12;
+const BOOST_HEMI = 0.22;
 const BOOST_SUN = 0.55;
 
-// How far you can see before the haze takes over (metres).
+// How far you can see before the haze takes over (metres), in clear weather.
 const FOG_NEAR = 140;
 const FOG_FAR = 560;
 
-// Sun shadows: one shadow map that follows the player. Only used where quality.shadows is on.
-const SHADOW_RANGE = 70; // half-width of the shadowed square around the player (m)
-const SHADOW_DISTANCE = 160; // how far the sun's shadow camera sits from the player (m)
+// Weather tints: grey overcast sky and pale mist.
+const OVERCAST = new THREE.Color("#8d99a6");
+const MISTY = new THREE.Color("#c9d0d3");
 
 type Pal = {
   daySky: THREE.Color;
@@ -76,40 +73,13 @@ export function DayNight() {
   const dirRef = useRef<THREE.DirectionalLight>(null);
   const hemiRef = useRef<THREE.HemisphereLight>(null);
   const ambRef = useRef<THREE.AmbientLight>(null);
-  const { scene, gl } = useThree();
+  const { scene } = useThree();
 
   const state = useMemo(() => {
     const cur = pal(NEUTRAL_VALUES);
     const tgt = pal(NEUTRAL_VALUES);
     return { cur, tgt, sky: new THREE.Color(), fog: new THREE.Color(), sun: new THREE.Color() };
   }, []);
-  const sun = useMemo(() => createSunState(), []);
-
-  // One-time shadow set-up. castShadow itself is switched on in the frame loop (below) so the
-  // quality setting can turn it on and off without rebuilding anything.
-  useEffect(() => {
-    const light = dirRef.current;
-    if (!light) return;
-    scene.add(light.target);
-    const cam = light.shadow.camera;
-    cam.left = -SHADOW_RANGE;
-    cam.right = SHADOW_RANGE;
-    cam.top = SHADOW_RANGE;
-    cam.bottom = -SHADOW_RANGE;
-    cam.near = 1;
-    cam.far = SHADOW_DISTANCE * 2.2;
-    cam.updateProjectionMatrix();
-    if (light.shadow.map) {
-      light.shadow.map.dispose();
-      light.shadow.map = null;
-    }
-    light.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
-    light.shadow.bias = -0.0004;
-    light.shadow.normalBias = 0.08;
-    return () => {
-      scene.remove(light.target);
-    };
-  }, [scene]);
 
   useFrame(({ clock }, dt) => {
     // Atmosphere takes the color of the kingdom that holds the land you stand on.
@@ -126,53 +96,36 @@ export function DayNight() {
       state.cur[k].lerp(state.tgt[k], blend);
     }
 
-    const phase = daylightPhase(clock.elapsedTime);
-    const weight = daylightWeight(phase);
-    updateSun(phase, sun);
+    const weight = daylightWeight((clock.elapsedTime / CYCLE_SECONDS + 0.35) % 1);
     state.sky.copy(state.cur.duskSky).lerp(state.cur.daySky, weight);
     state.fog.copy(state.cur.duskFog).lerp(state.cur.dayFog, weight);
     state.sun.copy(state.cur.duskSun).lerp(state.cur.daySun, weight);
 
-    // Golden hour: a low sun is warmer and a little weaker than a high one.
-    const low = Math.max(0, 1 - Math.max(sun.altitude, 0) / 0.5);
-    state.sun.lerp(state.cur.duskSun, low * 0.65 * weight);
+    // Weather: rain greys and dims the sky and sun; mist and rain bring the haze in close.
+    const rain = weather.rain;
+    const mist = weather.mist;
+    state.sky.lerp(OVERCAST, Math.min(1, rain * 0.75 + mist * 0.2));
+    state.fog.lerp(MISTY, Math.min(1, mist * 0.7 + rain * 0.5));
+    const dim = 1 - Math.min(0.75, rain * 0.55 + mist * 0.2);
 
     const intensity =
-      (MIN_SUN_INTENSITY + weight * (MAX_SUN_INTENSITY - MIN_SUN_INTENSITY) + BOOST_SUN) *
-      (1 - 0.25 * low * weight);
+      (MIN_SUN_INTENSITY + weight * (MAX_SUN_INTENSITY - MIN_SUN_INTENSITY) + BOOST_SUN) * dim;
 
     if (scene.background instanceof THREE.Color) scene.background.copy(state.sky);
     else scene.background = state.sky.clone();
     if (scene.fog && "color" in scene.fog) {
       const fog = scene.fog as THREE.Fog;
       fog.color.copy(state.fog);
-      fog.near = FOG_NEAR;
-      fog.far = FOG_FAR;
+      fog.near = FOG_NEAR * (1 - 0.7 * mist - 0.35 * rain);
+      fog.far = FOG_FAR * (1 - 0.5 * mist - 0.35 * rain);
     }
 
-    const light = dirRef.current;
-    if (light) {
-      light.color.copy(state.sun);
-      light.intensity = intensity;
-
-      // The light travels with the sun across the sky; its shadow box stays centred on the player.
-      const cx = Math.round(playerState.pos.x);
-      const cz = Math.round(playerState.pos.z);
-      light.target.position.set(cx, groundHeight(cx, cz), cz);
-      light.position.set(
-        light.target.position.x + sun.lightX * SHADOW_DISTANCE,
-        light.target.position.y + sun.lightY * SHADOW_DISTANCE,
-        light.target.position.z + sun.lightZ * SHADOW_DISTANCE,
-      );
-      light.target.updateMatrixWorld();
-
-      if (light.castShadow !== quality.shadows) {
-        light.castShadow = quality.shadows;
-        gl.shadowMap.enabled = quality.shadows;
-      }
+    if (dirRef.current) {
+      dirRef.current.color.copy(state.sun);
+      dirRef.current.intensity = intensity;
     }
     if (hemiRef.current) {
-      hemiRef.current.intensity = MIN_HEMISPHERE_INTENSITY + weight * 0.3 + BOOST_HEMI;
+      hemiRef.current.intensity = (MIN_HEMISPHERE_INTENSITY + weight * 0.3 + BOOST_HEMI) * (1 - 0.2 * rain);
       hemiRef.current.color.copy(state.sky);
     }
     if (ambRef.current) {
