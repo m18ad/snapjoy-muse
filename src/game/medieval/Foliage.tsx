@@ -7,11 +7,13 @@ import { BLOCK_SIZE, BUILDINGS, districtAt } from "../worldData";
 import { autumnAt, forestAt, groundHeight, isVillageBlock, roadDistance } from "../terrain";
 import { ROAD_W } from "../city/layout";
 import { hash01, themeOf } from "../city/palette";
+import { weather } from "./weatherState";
 
 // The living landscape: pines, trees, bushes, ferns, grass, flowers, mushrooms, mossy boulders,
 // pebbles and stone edging along the trails, all from the Stylized Nature kit.
 // Each kingdom is its own biome: Kings = green meadow with pines, Warriors = red-orange autumn,
 // Outcasts = dense deep forest with ferns and mushrooms, Monsters = sparse dry land with dead trees.
+// Grass, flowers, ferns, bushes and leaves sway in the wind (stronger in storms).
 // Only what is near you is drawn: the world around the camera is rebuilt as you move, using a few
 // instanced meshes per plant type, so thousands of plants cost only a few dozen draw calls.
 
@@ -24,6 +26,7 @@ type Group = {
   roadPad: number; // keep this far from the trail edge (m)
   rectPad: number; // keep this far from buildings (m)
   salt: number;
+  wind: number; // how far the top of the plant sways (per metre of height); 0 = rigid
   prob: (x: number, z: number, forest: number) => number;
   edge?: boolean; // only along the trail edge
 };
@@ -31,18 +34,18 @@ type Group = {
 const HALF_ROAD = ROAD_W / 2;
 
 const GROUPS: Record<GroupKey, Group> = {
-  tree: { cell: 14, radius: 110, cap: 90, roadPad: 3.0, rectPad: 6.0, salt: 10, prob: (_x, _z, f) => 0.12 + 0.6 * f },
-  bush: { cell: 8, radius: 65, cap: 70, roadPad: 1.4, rectPad: 2.5, salt: 20, prob: (_x, _z, f) => 0.2 + 0.3 * f },
-  plant: { cell: 6, radius: 50, cap: 120, roadPad: 0.6, rectPad: 1.5, salt: 30, prob: (_x, _z, f) => 0.28 + 0.3 * f },
-  grass: { cell: 2.4, radius: 34, cap: 520, roadPad: 0.2, rectPad: 0.8, salt: 40, prob: () => 0.85 },
+  tree: { cell: 14, radius: 110, cap: 90, roadPad: 3.0, rectPad: 6.0, salt: 10, wind: 0.012, prob: (_x, _z, f) => 0.12 + 0.6 * f },
+  bush: { cell: 8, radius: 65, cap: 70, roadPad: 1.4, rectPad: 2.5, salt: 20, wind: 0.05, prob: (_x, _z, f) => 0.2 + 0.3 * f },
+  plant: { cell: 6, radius: 50, cap: 120, roadPad: 0.6, rectPad: 1.5, salt: 30, wind: 0.1, prob: (_x, _z, f) => 0.28 + 0.3 * f },
+  grass: { cell: 2.4, radius: 34, cap: 520, roadPad: 0.2, rectPad: 0.8, salt: 40, wind: 0.35, prob: () => 0.85 },
   flower: {
-    cell: 5, radius: 46, cap: 130, roadPad: 0.4, rectPad: 1.0, salt: 50,
+    cell: 5, radius: 46, cap: 130, roadPad: 0.4, rectPad: 1.0, salt: 50, wind: 0.22,
     prob: (x, z) => (0.5 + 0.5 * Math.sin(x * 0.045 + z * 0.031) * Math.cos(z * 0.052 - x * 0.02) > 0.62 ? 0.8 : 0.1),
   },
-  rock: { cell: 16, radius: 80, cap: 40, roadPad: 1.5, rectPad: 3.5, salt: 60, prob: (_x, _z, f) => 0.22 + 0.2 * f },
-  mush: { cell: 9, radius: 46, cap: 40, roadPad: 0.8, rectPad: 1.5, salt: 70, prob: (_x, _z, f) => (f > 0.45 ? 0.35 : 0.02) },
-  pebble: { cell: 3, radius: 44, cap: 160, roadPad: 0, rectPad: 0.5, salt: 80, prob: () => 1, edge: true },
-  edgestone: { cell: 7, radius: 60, cap: 60, roadPad: 0, rectPad: 0.5, salt: 90, prob: () => 0.55, edge: true },
+  rock: { cell: 16, radius: 80, cap: 40, roadPad: 1.5, rectPad: 3.5, salt: 60, wind: 0, prob: (_x, _z, f) => 0.22 + 0.2 * f },
+  mush: { cell: 9, radius: 46, cap: 40, roadPad: 0.8, rectPad: 1.5, salt: 70, wind: 0, prob: (_x, _z, f) => (f > 0.45 ? 0.35 : 0.02) },
+  pebble: { cell: 3, radius: 44, cap: 160, roadPad: 0, rectPad: 0.5, salt: 80, wind: 0, prob: () => 1, edge: true },
+  edgestone: { cell: 7, radius: 60, cap: 60, roadPad: 0, rectPad: 0.5, salt: 90, wind: 0, prob: () => 0.55, edge: true },
 };
 
 // How much of each group a kingdom's biome has (1 = the Kings' meadow).
@@ -176,22 +179,57 @@ function extract(scene: THREE.Object3D) {
   return { byMat, h0: size.y || 1, len0: Math.max(size.x, size.z) || 1, minY: box.min.y };
 }
 
-/** Leaf cards are flat-colour cut-outs, so the leaf colour comes from the instance, not the texture. */
-function leafMaterial(src: THREE.Material): THREE.Material {
-  const m = src.clone() as THREE.MeshStandardMaterial;
-  m.side = THREE.DoubleSide;
-  m.onBeforeCompile = (shader) => {
+// ---- Wind ----------------------------------------------------------------------------
+// One shared clock and gain for every swaying material. The sway grows with height above the plant's
+// base (so roots stay put), gusts roll across the land, and every instance has its own phase.
+const windTime = { value: 0 };
+const windGain = { value: 1 };
+
+type ShaderLike = { uniforms: Record<string, { value: unknown }>; vertexShader: string; fragmentShader: string };
+
+function addWind(shader: ShaderLike, strength: number, leafColour: boolean) {
+  shader.uniforms.uWindTime = windTime;
+  shader.uniforms.uWindGain = windGain;
+  shader.uniforms.uWindStrength = { value: strength };
+  shader.vertexShader = shader.vertexShader
+    .replace(
+      "#include <common>",
+      "#include <common>\nuniform float uWindTime;\nuniform float uWindGain;\nuniform float uWindStrength;",
+    )
+    .replace(
+      "#include <begin_vertex>",
+      `#include <begin_vertex>
+      #ifdef USE_INSTANCING
+        vec3 wp = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+      #else
+        vec3 wp = vec3(0.0);
+      #endif
+      float gust = 0.75 + 0.25 * sin(uWindTime * 0.35 + wp.x * 0.015 + wp.z * 0.011);
+      float ph = uWindTime * 1.7 + wp.x * 0.37 + wp.z * 0.29 + transformed.y * 0.8;
+      float amt = uWindStrength * uWindGain * gust * max(transformed.y, 0.0);
+      transformed.x += sin(ph) * amt + sin(ph * 2.3) * amt * 0.3;
+      transformed.z += cos(ph * 0.8 + 1.3) * amt * 0.6;`,
+    );
+  if (leafColour) {
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <map_fragment>",
       "#include <map_fragment>\n  diffuseColor.rgb = vColor.rgb;",
     );
-  };
-  m.customProgramCacheKey = () => "foliage-leaf";
+  }
+}
+
+/** Leaf cards are flat-colour cut-outs, so the leaf colour comes from the instance, not the texture. */
+function leafMaterial(src: THREE.Material, wind: number): THREE.Material {
+  const m = src.clone() as THREE.MeshStandardMaterial;
+  m.side = THREE.DoubleSide;
+  m.onBeforeCompile = (shader) => addWind(shader as unknown as ShaderLike, wind, true);
+  m.customProgramCacheKey = () => "foliage-leaf-wind";
   return m;
 }
 
 function buildSpecies(spec: Spec, scene: THREE.Object3D): SpeciesData {
-  const cap = GROUPS[spec.group].cap;
+  const group = GROUPS[spec.group];
+  const cap = group.cap;
   const { byMat, h0, len0, minY } = extract(scene);
   const parts: Part[] = [];
   byMat.forEach((geos, mat) => {
@@ -201,17 +239,18 @@ function buildSpecies(spec: Spec, scene: THREE.Object3D): SpeciesData {
     const leaf = !!spec.leaf && /leaf|leaves/i.test(mat.name);
     let material: THREE.Material = mat;
     if (leaf) {
-      material = leafMaterial(mat);
+      material = leafMaterial(mat, group.wind);
     } else if ((mat as THREE.MeshStandardMaterial).alphaTest > 0 || /grass|flower|leaves/i.test(mat.name)) {
       material = mat.clone();
       material.side = THREE.DoubleSide;
+      if (group.wind > 0) {
+        material.onBeforeCompile = (shader) => addWind(shader as unknown as ShaderLike, group.wind, false);
+        material.customProgramCacheKey = () => "foliage-wind";
+      }
     }
     const mesh = new THREE.InstancedMesh(geometry, material, cap);
     mesh.frustumCulled = false;
     mesh.count = 0;
-    // Trees and boulders throw sun shadows; every plant catches them (only drawn when shadows are on).
-    mesh.castShadow = spec.group === "tree" || spec.group === "rock";
-    mesh.receiveShadow = true;
     if (leaf) mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
     parts.push({ mesh, tinted: leaf });
   });
@@ -326,7 +365,11 @@ function FoliageInner() {
 
   const last = useRef<{ x: number; z: number } | null>(null);
   const clock = useRef(0);
-  useFrame(({ camera }, dt) => {
+  useFrame(({ camera, clock: sceneClock }, dt) => {
+    // The wind blows every frame.
+    windTime.value = sceneClock.elapsedTime;
+    windGain.value = weather.wind;
+
     clock.current += dt;
     if (clock.current < 0.3) return;
     clock.current = 0;
