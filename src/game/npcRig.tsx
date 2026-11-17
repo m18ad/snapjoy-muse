@@ -4,7 +4,9 @@ import * as THREE from "three";
 import { GLTFLoader, type GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { pushAlert } from "./alertState";
+import { input } from "./input";
 import { mountState } from "./mountState";
+import { weaponState, type WeaponId } from "./weaponState";
 import type { CharacterRefs } from "./Character";
 
 // A real, skinned human for NPCs and the player: a Quaternius modular outfit + head + hair on one
@@ -15,6 +17,8 @@ import type { CharacterRefs } from "./Character";
 // The old blocky character is hidden from the very first frame, so it never shows up before the real
 // one. It only comes back if the real one fails to load or does not match the animations, and a
 // message on screen says why.
+//
+// The player also carries the real weapon models (see WEAPON_SPECS below).
 
 const search = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
 
@@ -22,6 +26,7 @@ export const RIG_ENABLED = search ? search.get("rignpc") !== "0" : false;
 
 const MODEL_DIR = "/models/characters/";
 const ANIM_DIR = "/models/animations/";
+const WEAPON_DIR = "/models/weapons/";
 const ANIM_FILES = ["ual1-a", "ual1-b", "ual2-a", "ual2-b"];
 // How big the real body is drawn. The world is built on a large scale (trees 13-24 m), so the
 // characters are drawn bigger than life-size. Try ?rigscale=1.8 in the URL to compare sizes.
@@ -234,6 +239,104 @@ async function buildBody(npcId: number, color: string): Promise<Built | null> {
   return { root, tints, materials };
 }
 
+// ---- Real weapon models ------------------------------------------------------------------
+// Which model each game weapon uses, and how long it is in metres (before the character scale).
+// Weapons not listed here (the grenade and the tank cannon) keep their old look.
+//   frontIsWide: the front end of the model is its wide end (a crossbow's limbs), not its thin barrel.
+//   up: the model is held standing up (a bow), not pointing forward.
+type WeaponSpec = { file: string; length: number; frontIsWide?: boolean; up?: boolean };
+const WEAPON_SPECS: Partial<Record<WeaponId, WeaponSpec>> = {
+  pistol: { file: "mpx", length: 0.45 },
+  smg: { file: "mpx", length: 0.62 },
+  rifle: { file: "crossbow", length: 0.85, frontIsWide: true },
+  shotgun: { file: "crossbow", length: 0.95, frontIsWide: true },
+  sniper: { file: "wooden-bow", length: 1.25, up: true },
+};
+
+/**
+ * Turns a weapon model of unknown orientation into one that points forward (+Z) with its magazine or
+ * grip underneath, scaled to `length`, and with its origin where a hand would hold it.
+ * The long axis is the barrel; the thinner end is the muzzle; the heavier side is the underside.
+ */
+function buildWeapon(src: THREE.Object3D, spec: WeaponSpec): THREE.Object3D {
+  const scene = src.clone(true);
+  scene.updateMatrixWorld(true);
+
+  const pts: THREE.Vector3[] = [];
+  scene.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh || !m.geometry.attributes.position) return;
+    const pos = m.geometry.attributes.position;
+    const stride = Math.max(1, Math.floor(pos.count / 4000));
+    for (let i = 0; i < pos.count; i += stride) {
+      pts.push(new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld));
+    }
+  });
+  if (pts.length === 0) return scene;
+
+  const box = new THREE.Box3().setFromPoints(pts);
+  const size = box.getSize(new THREE.Vector3());
+  const axis = size.x >= size.y && size.x >= size.z ? 0 : size.y >= size.z ? 1 : 2;
+  const other: [number, number] = axis === 0 ? [1, 2] : axis === 1 ? [0, 2] : [0, 1];
+  const lo = box.min.getComponent(axis);
+  const len = Math.max(size.getComponent(axis), 1e-6);
+
+  // How big is the cross-section at each end of the long axis?
+  const ends = [
+    { min: [Infinity, Infinity], max: [-Infinity, -Infinity] },
+    { min: [Infinity, Infinity], max: [-Infinity, -Infinity] },
+  ];
+  for (const p of pts) {
+    const t = (p.getComponent(axis) - lo) / len;
+    const e = t < 0.2 ? ends[0] : t > 0.8 ? ends[1] : null;
+    if (!e) continue;
+    for (let k = 0; k < 2; k++) {
+      const v = p.getComponent(other[k]);
+      e.min[k] = Math.min(e.min[k], v);
+      e.max[k] = Math.max(e.max[k], v);
+    }
+  }
+  const area = (e: (typeof ends)[number]) => Math.max(0, e.max[0] - e.min[0]) * Math.max(0, e.max[1] - e.min[1]);
+  const highIsThinner = area(ends[1]) < area(ends[0]);
+  const frontIsHigh = spec.up ? true : spec.frontIsWide ? !highIsThinner : highIsThinner;
+
+  const dir = new THREE.Vector3();
+  dir.setComponent(axis, frontIsHigh ? 1 : -1);
+  const target = spec.up ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+  let q = new THREE.Quaternion().setFromUnitVectors(dir, target);
+
+  // Roll about the barrel so the heavier side (magazine, grip, stock) ends up underneath.
+  if (!spec.up) {
+    const centre = box.getCenter(new THREE.Vector3()).applyQuaternion(q);
+    const mean = new THREE.Vector3();
+    for (const p of pts) mean.add(p.clone().applyQuaternion(q));
+    mean.divideScalar(pts.length).sub(centre);
+    if (Math.hypot(mean.x, mean.y) > len * 0.005) {
+      const roll = -Math.PI / 2 - Math.atan2(mean.y, mean.x);
+      q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), roll).multiply(q);
+    }
+  }
+
+  const rotated = new THREE.Box3();
+  for (const p of pts) rotated.expandByPoint(p.clone().applyQuaternion(q));
+  const rsize = rotated.getSize(new THREE.Vector3());
+  const rc = rotated.getCenter(new THREE.Vector3());
+  const along = spec.up ? rsize.y : rsize.z;
+
+  const turned = new THREE.Group();
+  turned.quaternion.copy(q);
+  turned.add(scene);
+  // The hand holds it a little behind the middle (or at the middle, for a bow).
+  const grip = spec.up ? new THREE.Vector3(rc.x, rc.y, rc.z) : new THREE.Vector3(rc.x, rc.y, rotated.min.z + 0.3 * rsize.z);
+  turned.position.set(-grip.x, -grip.y, -grip.z);
+  const holder = new THREE.Group();
+  holder.add(turned);
+  holder.scale.setScalar(spec.length / Math.max(along, 1e-6));
+  const outer = new THREE.Group();
+  outer.add(holder);
+  return outer;
+}
+
 // ---- The component -----------------------------------------------------------------------
 export type RigSyncOptions = {
   /** Raise the body above the ground (sitting on a horse). */
@@ -420,9 +523,9 @@ function hideBlocky(node: THREE.Object3D, keep: Set<THREE.Object3D>, hidden: THR
 
 /**
  * Gives an existing blocky Character (the player) a real body. It follows the blocky character's
- * root every frame, so all the existing movement and aiming code keeps working unchanged. The held
- * weapon stays on the blocky right arm. The blocky body is hidden at once, and only comes back if
- * the real one cannot be used.
+ * root every frame, so all the existing movement and aiming code keeps working unchanged. The blocky
+ * body is hidden at once, and only comes back if the real one cannot be used. The player also holds
+ * the real weapon model for the current weapon, carried in front of the body (raised when aiming).
  */
 export function RigFollow({
   target,
@@ -438,6 +541,11 @@ export function RigFollow({
   const rig = useRef<RigHandle>(null);
   const phase = useRef<"start" | "hidden" | "failed">("start");
   const hiddenMeshes = useRef<THREE.Object3D[]>([]);
+  const oldWeapon = useRef<THREE.Object3D[]>([]);
+  const weaponHolder = useRef<THREE.Group>(null);
+  const weapons = useRef(new Map<WeaponId, THREE.Object3D | "loading" | "failed">());
+  const oldShown = useRef(true);
+
   useFrame((_, dt) => {
     const r = target.current;
     const rg = rig.current;
@@ -449,6 +557,7 @@ export function RigFollow({
         r.armR?.children.forEach((c) => {
           if (c.type === "Group") keep.add(c);
         });
+        oldWeapon.current = [...keep];
         hideBlocky(r.body, keep, hiddenMeshes.current);
       }
     }
@@ -457,11 +566,69 @@ export function RigFollow({
       phase.current = "failed";
       for (const m of hiddenMeshes.current) m.visible = true;
       hiddenMeshes.current = [];
+      for (const o of oldWeapon.current) o.visible = true;
+      if (weaponHolder.current) weaponHolder.current.visible = false;
     }
     if (phase.current === "failed") return;
     mountState.yaw = r.root.rotation.y;
     rg.sync(r.root, Math.min(dt, 0.05), false, mountState.mounted ? { lift: mountState.lift, idle: true } : undefined);
+
+    // ---- The real weapon model ----
+    const holder = weaponHolder.current;
+    if (!holder) return;
+    const id = weaponState.current;
+    const spec = WEAPON_SPECS[id];
+    let active: THREE.Object3D | null = null;
+    if (rg.ready() && spec) {
+      const entry = weapons.current.get(id);
+      if (entry === undefined) {
+        weapons.current.set(id, "loading");
+        loadGltf(`${WEAPON_DIR}${spec.file}.glb`)
+          .then((g) => {
+            const obj = buildWeapon(g.scene, spec);
+            obj.visible = false;
+            holder.add(obj);
+            weapons.current.set(id, obj);
+          })
+          .catch((e) => {
+            weapons.current.set(id, "failed");
+            console.warn("[npcRig] could not load weapon", spec.file, e);
+          });
+      } else if (typeof entry !== "string") {
+        active = entry;
+      }
+    }
+    weapons.current.forEach((e) => {
+      if (typeof e !== "string") e.visible = e === active;
+    });
+    holder.visible = active !== null && r.root.visible;
+    // The old procedural weapon only shows while there is no real model to replace it.
+    const showOld = active === null;
+    if (showOld !== oldShown.current) {
+      oldShown.current = showOld;
+      for (const o of oldWeapon.current) o.visible = showOld;
+    }
+    if (active) {
+      const yaw = r.root.rotation.y;
+      const aiming = input.aim || input.fire;
+      const right = aiming ? 0.2 : 0.3;
+      const up = aiming ? 1.38 : 1.08;
+      const fwd = aiming ? 0.55 : 0.35;
+      const lift = mountState.mounted ? mountState.lift : 0;
+      holder.position.set(
+        r.root.position.x + (-Math.cos(yaw) * right + Math.sin(yaw) * fwd) * RIG_SCALE,
+        r.root.position.y + lift + up * RIG_SCALE,
+        r.root.position.z + (Math.sin(yaw) * right + Math.cos(yaw) * fwd) * RIG_SCALE,
+      );
+      holder.rotation.y = yaw;
+      holder.scale.setScalar(RIG_SCALE);
+    }
   });
   if (!RIG_ENABLED) return null;
-  return <RiggedNpc ref={rig} npcId={npcId} color={color} tuning={tuning} />;
+  return (
+    <>
+      <RiggedNpc ref={rig} npcId={npcId} color={color} tuning={tuning} />
+      <group ref={weaponHolder} visible={false} />
+    </>
+  );
 }
