@@ -11,7 +11,8 @@ export type Tracer = {
 
 export const TRACERS: Tracer[] = [];
 export const MAX_TRACERS = 32;
-export const TRACER_LIFETIME = 0.1;
+// Long enough to watch an arrow fly across the screen (it was 0.1 s for the old instant streaks).
+export const TRACER_LIFETIME = 0.2;
 let nextId = 1;
 
 export function spawnTracer(start: THREE.Vector3, dir: THREE.Vector3, len = 45, hit = false) {
