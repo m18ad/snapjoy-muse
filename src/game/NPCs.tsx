@@ -250,11 +250,11 @@ function NPCUnit({ npc }: { npc: NPCState }) {
       npc.hitFlash -= dtc;
     }
 
-    // Real skinned body (opt-in with ?rignpc=1): follows the blocky one's root and hides it once ready.
+    // Real skinned body (on by default, ?rignpc=0 turns it off): follows the blocky one's root. The old
+    // blocky body stays hidden from the first frame and only comes back if the real one cannot be used.
     const rg = rig.current;
     if (rg) {
-      const on = rg.ready();
-      if (r.body) r.body.visible = !on;
+      if (r.body) r.body.visible = rg.failed();
       rg.sync(r.root, dtc, npc.hitFlash > 0);
     }
 

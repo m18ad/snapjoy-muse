@@ -10,8 +10,11 @@ import type { CharacterRefs } from "./Character";
 // A real, skinned human for NPCs and the player: a Quaternius modular outfit + head + hair on one
 // shared skeleton, animated with the Universal Animation Library clips (idle / walk / run), crossfaded
 // by how fast the character is actually moving. It is ON by default; add ?rignpc=0 to the game URL
-// to switch it off. If anything fails to load or the skeleton does not match the animations, the old
-// blocky character keeps being drawn and a message on screen says why.
+// to switch it off.
+//
+// The old blocky character is hidden from the very first frame, so it never shows up before the real
+// one. It only comes back if the real one fails to load or does not match the animations, and a
+// message on screen says why.
 
 const search = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
 
@@ -240,8 +243,10 @@ export type RigSyncOptions = {
 };
 
 export type RigHandle = {
-  /** True once the real body is loaded and animating; the blocky one should then be hidden. */
+  /** True once the real body is loaded and animating. */
   ready: () => boolean;
+  /** True if the real body could not be used, so the old blocky one should be shown instead. */
+  failed: () => boolean;
   /** Follow the blocky character's root (position, facing, visibility) and advance the animation. */
   sync: (root: THREE.Object3D, dt: number, hit: boolean, opt?: RigSyncOptions) => void;
 };
@@ -266,6 +271,7 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
 ) {
   const group = useRef<THREE.Group>(null);
   const state = useRef<State | null>(null);
+  const failed = useRef(false);
   const tune = useRef<RigTuning>(tuning ?? NPC_TUNING);
   tune.current = tuning ?? NPC_TUNING;
 
@@ -273,11 +279,16 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
     let cancelled = false;
     let built: Built | null = null;
     let mixer: THREE.AnimationMixer | null = null;
+    failed.current = false;
 
     (async () => {
       try {
         const [b, clips] = await Promise.all([buildBody(npcId, color), loadClips()]);
-        if (cancelled || !b) return;
+        if (cancelled) return;
+        if (!b) {
+          failed.current = true;
+          return;
+        }
         built = b;
         const names = new Set<string>();
         b.root.traverse((o) => {
@@ -295,7 +306,10 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
             );
           }
         }
-        if (!acts.idle || !acts.walk) return;
+        if (!acts.idle || !acts.walk) {
+          failed.current = true;
+          return;
+        }
         mixer = mx;
         acts.idle.play();
         group.current?.add(b.root);
@@ -312,6 +326,7 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
         };
         reportOk();
       } catch (e) {
+        failed.current = true;
         report(`could not build a character body (${e instanceof Error ? e.message : String(e)})`);
       }
     })();
@@ -331,6 +346,7 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
     ref,
     () => ({
       ready: () => state.current !== null,
+      failed: () => failed.current,
       sync: (root, dt, hit, opt) => {
         const g = group.current;
         const s = state.current;
@@ -390,19 +406,23 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
   return <group ref={group} visible={false} scale={RIG_SCALE} />;
 });
 
-/** Hides the blocky body's meshes, but not anything under `keep` (the weapon the player holds). */
-function hideBlocky(node: THREE.Object3D, keep: Set<THREE.Object3D>) {
+/** Hides the blocky body's meshes (remembering which), but not anything under `keep` (the held weapon). */
+function hideBlocky(node: THREE.Object3D, keep: Set<THREE.Object3D>, hidden: THREE.Object3D[]) {
   for (const c of node.children) {
     if (keep.has(c)) continue;
-    if ((c as THREE.Mesh).isMesh) c.visible = false;
-    hideBlocky(c, keep);
+    if ((c as THREE.Mesh).isMesh && c.visible) {
+      c.visible = false;
+      hidden.push(c);
+    }
+    hideBlocky(c, keep, hidden);
   }
 }
 
 /**
  * Gives an existing blocky Character (the player) a real body. It follows the blocky character's
  * root every frame, so all the existing movement and aiming code keeps working unchanged. The held
- * weapon stays on the blocky right arm, which is hidden.
+ * weapon stays on the blocky right arm. The blocky body is hidden at once, and only comes back if
+ * the real one cannot be used.
  */
 export function RigFollow({
   target,
@@ -416,21 +436,29 @@ export function RigFollow({
   tuning?: RigTuning;
 }) {
   const rig = useRef<RigHandle>(null);
-  const hidden = useRef(false);
+  const phase = useRef<"start" | "hidden" | "failed">("start");
+  const hiddenMeshes = useRef<THREE.Object3D[]>([]);
   useFrame((_, dt) => {
     const r = target.current;
     const rg = rig.current;
     if (!r || !r.root || !rg) return;
-    if (rg.ready() && !hidden.current) {
-      hidden.current = true;
+    if (phase.current === "start") {
+      phase.current = "hidden";
       if (r.body) {
         const keep = new Set<THREE.Object3D>();
         r.armR?.children.forEach((c) => {
           if (c.type === "Group") keep.add(c);
         });
-        hideBlocky(r.body, keep);
+        hideBlocky(r.body, keep, hiddenMeshes.current);
       }
     }
+    if (phase.current === "hidden" && rg.failed()) {
+      // The real body could not be used: bring the blocky one back.
+      phase.current = "failed";
+      for (const m of hiddenMeshes.current) m.visible = true;
+      hiddenMeshes.current = [];
+    }
+    if (phase.current === "failed") return;
     mountState.yaw = r.root.rotation.y;
     rg.sync(r.root, Math.min(dt, 0.05), false, mountState.mounted ? { lift: mountState.lift, idle: true } : undefined);
   });
