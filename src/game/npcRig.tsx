@@ -265,6 +265,7 @@ function findHand(root: THREE.Object3D): THREE.Object3D | null {
 //   up: the model is held standing up (a bow, a staff), not pointing forward.
 //   pitch: tilts the tip upward, in radians.
 //   swing: swings back and forth while firing (a sword).
+//   flip: turns the model upside down about its length (if it came out the wrong way up).
 type WeaponSpec = {
   file: string;
   length: number;
@@ -272,9 +273,10 @@ type WeaponSpec = {
   up?: boolean;
   pitch?: number;
   swing?: boolean;
+  flip?: boolean;
 };
 const WEAPON_SPECS: Partial<Record<WeaponId, WeaponSpec>> = {
-  pistol: { file: "crossbow", length: 0.75, frontIsWide: true },
+  pistol: { file: "crossbow", length: 0.75, frontIsWide: true, flip: true },
   smg: { file: "wooden-bow", length: 1.1, up: true },
   rifle: { file: "staff", length: 1.7, up: true },
   shotgun: { file: "katana-sword", length: 1.0, pitch: 0.7, swing: true },
@@ -351,6 +353,9 @@ function buildWeapon(src: THREE.Object3D, spec: WeaponSpec): THREE.Object3D {
     if (Math.hypot(mean.x, mean.y) > len * 0.005) {
       const roll = -Math.PI / 2 - Math.atan2(mean.y, mean.x);
       q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), roll).multiply(q);
+    }
+    if (spec.flip) {
+      q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI).multiply(q);
     }
   }
 

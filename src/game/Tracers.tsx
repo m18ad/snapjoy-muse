@@ -11,7 +11,8 @@ const FWD = new THREE.Vector3(0, 0, 1);
 const tmp = new THREE.Vector3();
 const quat = new THREE.Quaternion();
 const SLOTS = Array.from({ length: MAX_TRACERS }, (_, i) => i);
-const ARROW_SCALE = 1.4;
+// The world is large, so arrows are drawn big enough to be seen from the camera.
+const ARROW_SCALE = 2.6;
 
 export function Tracers() {
   const lines = useRef<(THREE.Group | null)[]>([]);
@@ -52,7 +53,7 @@ export function Tracers() {
       if (cm) cm.opacity = f * 0.3;
 
       // The arrow itself, flying from the start to the end of the path.
-      const progress = 1 - f;
+      const progress = Math.min(1, (1 - f) * 1.15);
       a.visible = true;
       a.position.copy(t.start).addScaledVector(t.dir, t.len * progress);
       a.quaternion.copy(quat);
@@ -84,23 +85,24 @@ export function Tracers() {
                 transparent opacity={0} toneMapped={false} depthWrite={false} />
             </mesh>
           </group>
-          {/* An arrow: wooden shaft, steel head at the front (+Z), pale feathers at the back. */}
+          {/* An arrow: wooden shaft, steel head at the front (+Z), pale feathers at the back. Unlit and
+              bright so it can always be seen. */}
           <group ref={(el) => { arrows.current[i] = el; }} visible={false}>
             <mesh>
-              <boxGeometry args={[0.05, 0.05, 1.5]} />
-              <meshStandardMaterial color="#8a6a3a" roughness={0.9} />
+              <boxGeometry args={[0.06, 0.06, 1.5]} />
+              <meshBasicMaterial color="#d8b070" toneMapped={false} />
             </mesh>
             <mesh position={[0, 0, 0.85]} rotation={[Math.PI / 2, 0, 0]}>
-              <coneGeometry args={[0.1, 0.35, 6]} />
-              <meshStandardMaterial color="#cfd3d8" metalness={0.6} roughness={0.4} />
+              <coneGeometry args={[0.12, 0.38, 6]} />
+              <meshBasicMaterial color="#f1f4f8" toneMapped={false} />
             </mesh>
             <mesh position={[0, 0, -0.62]}>
-              <boxGeometry args={[0.012, 0.24, 0.32]} />
-              <meshStandardMaterial color="#e8e0c8" roughness={1} />
+              <boxGeometry args={[0.014, 0.26, 0.34]} />
+              <meshBasicMaterial color="#ffffff" toneMapped={false} />
             </mesh>
             <mesh position={[0, 0, -0.62]}>
-              <boxGeometry args={[0.24, 0.012, 0.32]} />
-              <meshStandardMaterial color="#e8e0c8" roughness={1} />
+              <boxGeometry args={[0.26, 0.014, 0.34]} />
+              <meshBasicMaterial color="#ffffff" toneMapped={false} />
             </mesh>
           </group>
           <mesh ref={(el) => { sparks.current[i] = el; }} visible={false}>
