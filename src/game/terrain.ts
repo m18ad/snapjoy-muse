@@ -41,6 +41,77 @@ function hills(x: number, z: number) {
   );
 }
 
+// ---- Mountains ---------------------------------------------------------------------------
+// Every kingdom has its own mountains, so each one has a skyline of its own:
+//   Kings (centre and east): broad, gentle green highlands.
+//   Warriors (west): red, craggy peaks.
+//   Outcasts (south): tall, dark, wooded peaks.
+//   Monsters (north, and the far east): sharp, dark spires.
+// A ring of mountains also runs round the edge of the map, with a gap at every headquarters. The
+// trails cut through them as passes. All numbers are fixed, so it is the same on every phone.
+
+type Peak = { x: number; z: number; r: number; h: number; sharp: number };
+
+const SIGNATURE_PEAKS: Peak[] = [
+  // The Kings
+  { x: 200, z: 70, r: 115, h: 46, sharp: 0 },
+  { x: -70, z: -200, r: 105, h: 42, sharp: 0 },
+  // The Warriors
+  { x: -330, z: -130, r: 85, h: 88, sharp: 0.35 },
+  { x: -370, z: 220, r: 90, h: 96, sharp: 0.35 },
+  { x: -250, z: 330, r: 80, h: 80, sharp: 0.35 },
+  // The Outcasts
+  { x: -70, z: 340, r: 95, h: 92, sharp: 0.1 },
+  { x: 110, z: 340, r: 95, h: 88, sharp: 0.1 },
+  // The Monsters
+  { x: -100, z: -380, r: 80, h: 112, sharp: 0.7 },
+  { x: 100, z: -340, r: 75, h: 104, sharp: 0.7 },
+  { x: -300, z: -330, r: 75, h: 96, sharp: 0.7 },
+  { x: 400, z: 220, r: 80, h: 92, sharp: 0.7 },
+];
+
+function buildPeaks(): Peak[] {
+  const list = [...SIGNATURE_PEAKS];
+  const r = lcg(424242);
+  const RIM = 470;
+  for (let t = -450; t <= 450; t += 90) {
+    const spots: [number, number][] = [[t, -RIM], [t, RIM], [-RIM, t], [RIM, t]];
+    for (const [x, z] of spots) {
+      const px = x + (r() - 0.5) * 40;
+      const pz = z + (r() - 0.5) * 40;
+      const rr = 70 + r() * 25;
+      const hh = 55 + r() * 35;
+      const sharp = r() * 0.5;
+      // Keep a gap at every headquarters, so the way in stays open.
+      if (HQ.some(([gx, gz]) => Math.hypot(px - gx * BLOCK, pz - gz * BLOCK) < 110)) continue;
+      list.push({ x: px, z: pz, r: rr, h: hh, sharp });
+    }
+  }
+  return list;
+}
+
+const PEAKS: Peak[] = buildPeaks();
+
+/** Height added by the mountains at (x, z): 0 on the plains, up to ~120 m on the highest peaks. */
+function mountains(x: number, z: number): number {
+  let sum = 0;
+  for (const p of PEAKS) {
+    const dx = x - p.x;
+    const dz = z - p.z;
+    const lim = p.r * 2.6;
+    if (dx > lim || dx < -lim || dz > lim || dz < -lim) continue;
+    const d = Math.hypot(dx, dz) / p.r;
+    if (d > 2.6) continue;
+    sum += p.h * Math.exp(-Math.pow(d, 2 - 1.2 * p.sharp));
+  }
+  if (sum < 1) return sum;
+  sum = Math.min(sum, 120);
+  // Craggy detail, and a gap where a trail crosses so the trails pass through the mountains.
+  const crag = 1 + 0.16 * Math.sin(x * 0.11 + z * 0.07) * Math.sin(z * 0.09 - x * 0.05);
+  const clear = smoothstep(6, 30, roadDistance(x, z));
+  return sum * crag * clear;
+}
+
 /** 0 at the map edge, 1 well inside it. */
 function edgeMask(x: number, z: number) {
   const gx = Math.round(x / BLOCK);
@@ -60,7 +131,7 @@ function baseHeight(x: number, z: number) {
   let m = edgeMask(x, z);
   if (m <= 0) return 0;
   for (const f of FLAT) m *= smoothstep(f.r0, f.r1, Math.hypot(x - f.x, z - f.z));
-  return m * hills(x, z);
+  return m * (hills(x, z) + mountains(x, z));
 }
 
 type Pad = { x: number; z: number; w: number; d: number; level: number };
@@ -285,10 +356,10 @@ export function roadDistance(x: number, z: number): number {
 
 // ---- Woods and autumn --------------------------------------------------------------------
 
-/** 0..1: how thickly wooded the land is here (clumps of forest between open meadow). */
+/** 0..1: how thickly wooded the land is here (clumps of forest between open meadow). Thins out up the mountains. */
 export function forestAt(x: number, z: number): number {
   const f = 0.5 + 0.28 * Math.sin(x * 0.013 + 1.0) + 0.22 * Math.cos(z * 0.011 - 0.5) + 0.18 * Math.sin((x + z) * 0.02);
-  return smoothstep(0.35, 0.75, f);
+  return smoothstep(0.35, 0.75, f) * (1 - smoothstep(50, 90, mountains(x, z)));
 }
 
 /** 0..1: patches of hillside that have turned autumn orange. */

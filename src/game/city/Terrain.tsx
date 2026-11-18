@@ -8,6 +8,8 @@ import { ROAD_W } from "./layout";
 // The ground of the whole world: one mesh, 8 m grid, painted with vertex colours and a soft detail
 // texture. Four biomes, one per kingdom, blend smoothly into each other:
 //   Kings = green meadow, Warriors = red-orange autumn, Outcasts = deep forest, Monsters = golden dry land.
+// Mountains turn to bare rock on the high ground and steep slopes, and to snow (or ash) on the peaks,
+// each kingdom with its own colours.
 
 const STEP = 8;
 const HALF = ((GRID * 2 + 2) * BLOCK_SIZE) / 2;
@@ -20,6 +22,19 @@ const BIOMES: [THREE.Color, THREE.Color, THREE.Color][] = [
   [new THREE.Color("#b0622a"), new THREE.Color("#c9832e"), new THREE.Color("#d9a23c")],
   [new THREE.Color("#3f7a30"), new THREE.Color("#4f8a34"), new THREE.Color("#6aa23c")],
   [new THREE.Color("#d6a85a"), new THREE.Color("#e0bc6a"), new THREE.Color("#ecc97c")],
+];
+// Bare rock and the peak colour of each kingdom's mountains.
+const ROCK: THREE.Color[] = [
+  new THREE.Color("#8a8576"), // Kings: grey stone
+  new THREE.Color("#a24a36"), // Warriors: red rock
+  new THREE.Color("#55604a"), // Outcasts: dark mossy stone
+  new THREE.Color("#4a3d58"), // Monsters: dark violet stone
+];
+const PEAK: THREE.Color[] = [
+  new THREE.Color("#f4f6f8"), // snow
+  new THREE.Color("#e8b88a"), // sun-baked sandstone
+  new THREE.Color("#eef2f0"), // snow
+  new THREE.Color("#b9a9d6"), // pale ash
 ];
 const AUTUMN = new THREE.Color("#d6a93a");
 const SAND = new THREE.Color("#d9c88f");
@@ -78,11 +93,19 @@ function buildTerrain() {
       const x = -HALF + i * STEP;
       const z = -HALF + j * STEP;
       const k = i * side + j;
+      const hv = groundHeight(x, z);
       pos[k * 3] = x;
-      pos[k * 3 + 1] = groundHeight(x, z);
+      pos[k * 3 + 1] = hv;
       pos[k * 3 + 2] = z;
       uv[k * 2] = x / 9;
       uv[k * 2 + 1] = z / 9;
+
+      // How steep is the ground here? Steep ground and high ground turn to bare rock.
+      const sx = (groundHeight(x + STEP, z) - groundHeight(x - STEP, z)) / (2 * STEP);
+      const sz = (groundHeight(x, z + STEP) - groundHeight(x, z - STEP)) / (2 * STEP);
+      const slope = Math.hypot(sx, sz);
+      const rockMix = Math.max(smooth(24, 44, hv), smooth(0.7, 1.1, slope));
+      const peakMix = smooth(62, 82, hv);
 
       const n1 = hash01(Math.floor(x / 16), Math.floor(z / 16), 3);
       const n2 = hash01(Math.floor(x / 9), Math.floor(z / 9), 4);
@@ -99,6 +122,8 @@ function buildTerrain() {
           if (n4 > 0.62) tmp.lerp(DRY_PATCH, (n4 - 0.62) * 1.5);
           else if (n4 < 0.3) tmp.lerp(DAMP_PATCH, (0.3 - n4) * 1.4);
         }
+        if (rockMix > 0) tmp.lerp(ROCK[kd], rockMix * (0.85 + 0.15 * n2));
+        if (peakMix > 0) tmp.lerp(PEAK[kd], peakMix);
         r += tmp.r; g += tmp.g; b += tmp.b;
       }
       tmp.setRGB(r / OFFSETS.length, g / OFFSETS.length, b / OFFSETS.length);
@@ -121,18 +146,44 @@ function buildTerrain() {
   return geo;
 }
 
+/**
+ * The plains that stretch on beyond the edge of the map: a huge flat ring with a square hole where the
+ * map is. (It used to be one big flat plane under the whole map, which poked through every valley and
+ * looked like flat patches of water.)
+ */
+function buildOuterPlain() {
+  const R = 4500;
+  const shape = new THREE.Shape();
+  shape.moveTo(-R, -R);
+  shape.lineTo(R, -R);
+  shape.lineTo(R, R);
+  shape.lineTo(-R, R);
+  shape.lineTo(-R, -R);
+  const hole = new THREE.Path();
+  const h = HALF - 1;
+  hole.moveTo(-h, -h);
+  hole.lineTo(-h, h);
+  hole.lineTo(h, h);
+  hole.lineTo(h, -h);
+  hole.lineTo(-h, -h);
+  shape.holes.push(hole);
+  const geo = new THREE.ShapeGeometry(shape);
+  geo.rotateX(-Math.PI / 2);
+  return geo;
+}
+
 export function Terrain() {
   const geo = useMemo(() => buildTerrain(), []);
+  const outer = useMemo(() => buildOuterPlain(), []);
   const tex = useMemo(() => detailTexture(), []);
   return (
     <group>
       <mesh geometry={geo} receiveShadow>
         <meshStandardMaterial vertexColors map={tex} roughness={1} />
       </mesh>
-      {/* Green plains stretching on beyond the edge of the map. */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.1, 0]}>
-        <planeGeometry args={[9000, 9000]} />
-        <meshStandardMaterial color="#86a845" roughness={1} />
+      {/* Green plains stretching on beyond the edge of the map (nothing under the map itself). */}
+      <mesh geometry={outer} position={[0, -0.1, 0]}>
+        <meshStandardMaterial color="#86a845" roughness={1} side={THREE.DoubleSide} />
       </mesh>
     </group>
   );
