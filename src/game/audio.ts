@@ -152,6 +152,91 @@ function noiseBurst(duration: number, filterFreq: number, gainAmt: number) {
 }
 
 // ---------------------------------------------------------------- Weapons
+// The game is medieval, so its weapon slots sound like medieval weapons (made with the Web Audio
+// synthesiser, no files needed): the starting weapon is a crossbow, then a bow, a lance, a sword and a
+// long bow. Only the grenade and the tank cannon keep their old recorded sounds.
+
+/** A single tone that slides from f0 to f1 and fades out. */
+function tone(type: OscillatorType, f0: number, f1: number, dur: number, gainAmt: number) {
+  if (!ctx) return;
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(f0, now());
+  osc.frequency.exponentialRampToValueAtTime(Math.max(1, f1), now() + dur);
+  g.gain.setValueAtTime(0.0001, now());
+  g.gain.linearRampToValueAtTime(gainAmt, now() + 0.004);
+  g.gain.exponentialRampToValueAtTime(0.0001, now() + dur);
+  osc.connect(g).connect(out());
+  osc.start();
+  osc.stop(now() + dur + 0.02);
+}
+
+/** Noise run through a band-pass filter whose centre slides from f0 to f1: a whoosh or a swish. */
+function sweptNoise(dur: number, f0: number, f1: number, gainAmt: number, q = 1) {
+  if (!ctx) return;
+  const size = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buffer = ctx.createBuffer(1, size, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < size; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  const filter = ctx.createBiquadFilter();
+  filter.type = "bandpass";
+  filter.Q.value = q;
+  filter.frequency.setValueAtTime(f0, now());
+  filter.frequency.exponentialRampToValueAtTime(Math.max(1, f1), now() + dur);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, now());
+  g.gain.linearRampToValueAtTime(gainAmt, now() + dur * 0.25);
+  g.gain.exponentialRampToValueAtTime(0.0001, now() + dur);
+  src.connect(filter).connect(g).connect(out());
+  src.start();
+  src.stop(now() + dur);
+}
+
+/** A bowstring: a plucked tone with an overtone. */
+function twang(freq: number, dur: number, gainAmt: number) {
+  tone("triangle", freq * 1.12, freq, dur, gainAmt);
+  tone("sine", freq * 2.01, freq * 2, dur * 0.7, gainAmt * 0.4);
+}
+
+export function playGunshot(weaponId: string) {
+  if (!ctx) return;
+  switch (weaponId) {
+    case "pistol": // crossbow: a dry thunk and the snap of the string
+      tone("triangle", 190, 70, 0.1, 0.55);
+      sweptNoise(0.06, 3500, 1800, 0.4, 0.8);
+      twang(420, 0.12, 0.2);
+      return;
+    case "smg": // bow: a quick twang and the whistle of the arrow
+      twang(300, 0.24, 0.4);
+      sweptNoise(0.14, 1200, 3600, 0.22, 1.2);
+      return;
+    case "rifle": // lance (a magic staff): a rising hum and shimmer
+      tone("sine", 220, 660, 0.28, 0.32);
+      tone("sine", 880, 1320, 0.32, 0.14);
+      sweptNoise(0.2, 800, 2600, 0.18, 1);
+      return;
+    case "shotgun": // sword: a swish through the air and a faint ring of steel
+      sweptNoise(0.2, 900, 4200, 0.5, 0.8);
+      tone("sine", 140, 90, 0.12, 0.2);
+      tone("sine", 2200, 1800, 0.25, 0.05);
+      return;
+    case "sniper": // long bow: a deep, heavy twang
+      twang(205, 0.42, 0.5);
+      tone("sine", 120, 55, 0.18, 0.3);
+      sweptNoise(0.2, 900, 3000, 0.2, 1.2);
+      return;
+    default:
+      break;
+  }
+  // Grenade and tank cannon keep their old sounds.
+  if (playSample(`shot_${weaponId}`, 0.7, 1, 0.04)) return;
+  const p = GUN_PROFILES[weaponId] ?? GUN_PROFILES.pistol;
+  noiseBurst(p.duration, p.filterFreq, p.gain);
+}
+
 const GUN_PROFILES: Record<string, { duration: number; filterFreq: number; gain: number }> = {
   pistol:  { duration: 0.09, filterFreq: 2200, gain: 0.5 },
   smg:     { duration: 0.06, filterFreq: 2600, gain: 0.4 },
@@ -160,13 +245,6 @@ const GUN_PROFILES: Record<string, { duration: number; filterFreq: number; gain:
   sniper:  { duration: 0.22, filterFreq: 1000, gain: 0.7 },
   tank:    { duration: 0.3,  filterFreq: 900,  gain: 0.9 },
 };
-
-export function playGunshot(weaponId: string) {
-  if (!ctx) return;
-  if (playSample(`shot_${weaponId}`, 0.7, 1, 0.04)) return;
-  const p = GUN_PROFILES[weaponId] ?? GUN_PROFILES.pistol;
-  noiseBurst(p.duration, p.filterFreq, p.gain);
-}
 
 export function playHitMarker() {
   if (!ctx) return;
