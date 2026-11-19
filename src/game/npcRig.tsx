@@ -6,6 +6,7 @@ import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.j
 import { pushAlert } from "./alertState";
 import { input } from "./input";
 import { mountState } from "./mountState";
+import { groundHeight } from "./terrain";
 import { weaponState, type WeaponId } from "./weaponState";
 import type { CharacterRefs } from "./Character";
 
@@ -20,6 +21,9 @@ import type { CharacterRefs } from "./Character";
 //
 // The player also carries the real medieval weapon models (see WEAPON_SPECS below), held in the
 // right hand.
+//
+// On a slope the body is lifted and tilted to follow the ground, so the uphill foot does not sink
+// into the hillside.
 
 const search = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
 
@@ -409,6 +413,9 @@ type State = {
   lz: number;
   hasLast: boolean;
   hit: boolean;
+  /** How far the body is lifted, and tilted nose-up, to follow a slope (smoothed). */
+  slopeLift: number;
+  slopePitch: number;
 };
 
 const FLASH = new THREE.Color("#ff3b3b");
@@ -472,6 +479,8 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
           lz: 0,
           hasLast: false,
           hit: false,
+          slopeLift: 0,
+          slopePitch: 0,
         };
         reportOk();
       } catch (e) {
@@ -522,13 +531,41 @@ export const RiggedNpc = forwardRef<RigHandle, { npcId: number; color: string; t
           s.hasLast = false;
           return;
         }
+        const step = Math.max(dt, 0.001);
+        const yaw = root.rotation.y;
+
+        // ---- Follow the ground: on a slope, lift the body so the uphill foot is not buried, and tilt it
+        // a little along the slope. (Not while riding or in the air: the horse and the jump look after that.)
+        let wantLift = 0;
+        let wantPitch = 0;
+        if (!opt?.lift) {
+          const x = root.position.x;
+          const z = root.position.z;
+          const gc = groundHeight(x, z);
+          if (root.position.y <= gc + 0.6) {
+            const sy = Math.sin(yaw);
+            const cy = Math.cos(yaw);
+            const f = 0.55 * RIG_SCALE; // the feet are about this far apart front to back
+            const sd = 0.3 * RIG_SCALE; // and this far apart side to side
+            const hF = groundHeight(x + sy * f, z + cy * f);
+            const hB = groundHeight(x - sy * f, z - cy * f);
+            const hL = groundHeight(x + cy * sd, z - sy * sd);
+            const hR = groundHeight(x - cy * sd, z + sy * sd);
+            wantLift = Math.max(0, Math.max(hF, hB, hL, hR) - gc) * 0.6;
+            wantPitch = THREE.MathUtils.clamp(-Math.atan2(hF - hB, f * 2) * 0.5, -0.35, 0.35);
+          }
+        }
+        const ease = Math.min(1, step * 10);
+        s.slopeLift += (wantLift - s.slopeLift) * ease;
+        s.slopePitch += (wantPitch - s.slopePitch) * ease;
+
         g.position.copy(root.position);
+        g.position.y += s.slopeLift;
         if (opt?.lift) g.position.y += opt.lift;
-        g.rotation.y = root.rotation.y;
+        g.rotation.set(s.slopePitch, yaw, 0, "YXZ");
         const t = tune.current;
 
         // How fast is it really moving? That picks idle / walk / run.
-        const step = Math.max(dt, 0.001);
         if (s.hasLast) {
           let v = Math.hypot(root.position.x - s.lx, root.position.z - s.lz) / step;
           if (v > t.teleport) v = 0; // a jump (respawn, level-of-detail switch), not real movement
