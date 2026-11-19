@@ -152,6 +152,26 @@ function padsOf(gx: number, gz: number): Pad[] {
   return p;
 }
 
+/**
+ * Cuts the ground around a tunnel mouth: a level apron in front of it, and a steep cliff face behind it
+ * for the tunnel door to sit in.
+ */
+function carve(h: number, t: Tunnel, x: number, z: number): number {
+  const dx = x - t.x;
+  const dz = z - t.z;
+  if (dx > 36 || dx < -36 || dz > 36 || dz < -36) return h;
+  const into = -(dx * t.ox + dz * t.oz); // distance into the mountain (negative = in front of the door)
+  const side = Math.abs(dz * t.ox - dx * t.oz); // sideways distance from the middle of the door
+  if (into < -22 || into > 18 || side > 20) return h;
+  const wSide = 1 - smoothstep(10, 20, side);
+  if (into <= 2) {
+    const wp = wSide * (into >= -11 ? 1 : smoothstep(-22, -11, into));
+    return h + (t.h - h) * wp;
+  }
+  const wall = Math.max(h, t.h + 22 * smoothstep(2, 9, into));
+  return h + (wall - h) * wSide;
+}
+
 /** Height of the ground at (x, z) in metres. */
 export function groundHeight(x: number, z: number): number {
   const gx = Math.round(x / BLOCK);
@@ -164,7 +184,33 @@ export function groundHeight(x: number, z: number): number {
     const m = 1 - smoothstep(2.5, 9, Math.hypot(dx, dz));
     if (m > 0) h += (p.level - h) * m;
   }
+  for (const t of TUNNELS) h = carve(h, t, x, z);
   return h;
+}
+
+// ---- Walking on slopes -------------------------------------------------------------------
+/** The steepest ground (rise over run) that can be walked up. Steeper than this is a wall. */
+export const MAX_WALK_SLOPE = 0.8;
+
+/**
+ * Stops anything on foot or on wheels from climbing a mountain side. Moving from (px, pz) to (nx, nz)
+ * is refused if it goes up too steeply; it then tries sliding along the slope instead (one axis at a
+ * time), and otherwise stays put. Going downhill is always allowed.
+ */
+export function steepBlock(px: number, pz: number, nx: number, nz: number): { x: number; z: number } {
+  const dx = nx - px;
+  const dz = nz - pz;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 1e-6) return { x: nx, z: nz };
+  const g0 = groundHeight(px, pz);
+  if ((groundHeight(nx, nz) - g0) / dist <= MAX_WALK_SLOPE) return { x: nx, z: nz };
+  const ax = Math.abs(dx);
+  const az = Math.abs(dz);
+  const xOk = ax > 1e-6 && (groundHeight(nx, pz) - g0) / ax <= MAX_WALK_SLOPE;
+  const zOk = az > 1e-6 && (groundHeight(px, nz) - g0) / az <= MAX_WALK_SLOPE;
+  if (xOk && (!zOk || ax >= az)) return { x: nx, z: pz };
+  if (zOk) return { x: px, z: nz };
+  return { x: px, z: pz };
 }
 
 // ---- Old grid lanes (kept only so older code that imports them still compiles) -------------
@@ -251,6 +297,9 @@ function makeTrail(a: Pt, b: Pt, r: () => number, bend: number): Pt[] {
   return pts;
 }
 
+/** The far end of every dead-end side trail, and the way it was heading (a unit vector). */
+const DEAD_ENDS: { x: number; z: number; ix: number; iz: number }[] = [];
+
 function buildTrails(): Pt[][] {
   const r = lcg(777001);
   const n = TRAIL_NODES.length;
@@ -300,7 +349,12 @@ function buildTrails(): Pt[][] {
       const len = 60 + r() * 80;
       const end = { x: p.x + Math.cos(ang) * len, z: p.z + Math.sin(ang) * len };
       if (Math.abs(end.x) > LIMIT - 20 || Math.abs(end.z) > LIMIT - 20) continue;
-      trails.push(makeTrail(p, end, r, 0.3));
+      const branch = makeTrail(p, end, r, 0.3);
+      trails.push(branch);
+      const last = branch[branch.length - 1];
+      const before = branch[Math.max(0, branch.length - 5)];
+      const l = Math.hypot(last.x - before.x, last.z - before.z) || 1;
+      DEAD_ENDS.push({ x: last.x, z: last.z, ix: (last.x - before.x) / l, iz: (last.z - before.z) / l });
     }
   }
   return trails;
@@ -353,6 +407,50 @@ export function roadDistance(x: number, z: number): number {
   }
   return best;
 }
+
+// ---- Tunnels -----------------------------------------------------------------------------
+// Where a dead-end trail runs into a real mountain, there is a tunnel mouth. Tunnels come in pairs:
+// walk in through one and you come out of the other, on the far side of the world.
+
+export type Tunnel = {
+  /** Centre of the tunnel door. */
+  x: number;
+  z: number;
+  /** Unit vector pointing out of the mountain, the way the trail arrives. */
+  ox: number;
+  oz: number;
+  /** Height of the level ground in front of the door. */
+  h: number;
+  /** Index of the tunnel this one leads to. */
+  pair: number;
+};
+
+function pickTunnels(): Tunnel[] {
+  const cands = DEAD_ENDS.map((e) => {
+    const h = baseHeight(e.x, e.z);
+    const ahead = baseHeight(e.x + e.ix * 34, e.z + e.iz * 34);
+    return { e, h, rise: ahead - h };
+  })
+    .filter((c) => Math.abs(c.e.x) < 480 && Math.abs(c.e.z) < 480)
+    .sort((a, b) => b.rise - a.rise);
+
+  const chosen: typeof cands = [];
+  const pickWith = (minRise: number) => {
+    for (const c of cands) {
+      if (chosen.length >= 6) break;
+      if (c.rise < minRise || chosen.includes(c)) continue;
+      if (chosen.some((o) => Math.hypot(o.e.x - c.e.x, o.e.z - c.e.z) < 220)) continue;
+      chosen.push(c);
+    }
+  };
+  pickWith(22);
+  if (chosen.length < 2) pickWith(8);
+  if (chosen.length % 2 === 1) chosen.pop();
+
+  return chosen.map((c, i) => ({ x: c.e.x, z: c.e.z, ox: -c.e.ix, oz: -c.e.iz, h: c.h, pair: i ^ 1 }));
+}
+
+export const TUNNELS: Tunnel[] = pickTunnels();
 
 // ---- Woods and autumn --------------------------------------------------------------------
 
