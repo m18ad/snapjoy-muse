@@ -4,6 +4,7 @@ import * as THREE from "three";
 import { Character, type CharacterRefs } from "./Character";
 import { RigFollow, PLAYER_TUNING } from "./npcRig";
 import { mountState } from "./mountState";
+import { teleportState } from "./teleportState";
 import {
   playFootstep,
   startEngine, updateEngine, stopEngine,
@@ -23,7 +24,7 @@ import {
 } from "./worldData";
 import { floorAt } from "./skyIslands";
 import { findFreeSpot } from "./unstick";
-import { groundHeight } from "./terrain";
+import { groundHeight, steepBlock } from "./terrain";
 import { fireShot } from "./shooting";
 import {
   playerState, healPlayer, revivePlayer, spendMoney, deathTax,
@@ -280,6 +281,11 @@ export function Player() {
             }
           }
 
+          // Cars cannot drive up mountain sides either.
+          const climb = steepBlock(c.x, c.z, nx, nz);
+          if (climb.x !== nx || climb.z !== nz) c.speed *= 0.3;
+          nx = climb.x; nz = climb.z;
+
           c.x = nx;
           c.z = nz;
 
@@ -438,6 +444,16 @@ export function Player() {
     }
     input.jump = false;
 
+    // A tunnel has just carried the player to its other end.
+    const tp = teleportState.pending;
+    if (tp) {
+      teleportState.pending = null;
+      r.root.position.set(tp.x, groundHeight(tp.x, tp.z) + 0.3, tp.z);
+      vel.current.set(0, 0, 0);
+      yaw.current = tp.yaw;
+      grounded.current = false;
+    }
+
     const p = r.root.position;
     const prevX = p.x, prevZ = p.z;
     const nx = p.x + vel.current.x * dtc;
@@ -456,6 +472,14 @@ export function Player() {
         p.x = h.pos.x + (dx / d) * HELI_BODY_RADIUS;
         p.z = h.pos.z + (dz / d) * HELI_BODY_RADIUS;
       }
+    }
+
+    // Mountain sides are too steep to walk up. This only applies while standing on the ground: a jump
+    // or a Sky Hall floor is not affected. Going downhill is always fine.
+    if (p.y <= groundHeight(prevX, prevZ) + 0.6) {
+      const climb = steepBlock(prevX, prevZ, p.x, p.z);
+      p.x = climb.x;
+      p.z = climb.z;
     }
 
     p.y += vel.current.y * dtc;
