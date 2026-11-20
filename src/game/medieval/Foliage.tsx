@@ -8,14 +8,16 @@ import { autumnAt, forestAt, groundHeight, isVillageBlock, roadDistance } from "
 import { ROAD_W } from "../city/layout";
 import { hash01, themeOf } from "../city/palette";
 import { weather } from "./weatherState";
+import { TREE_COLLIDERS } from "./treeState";
 
 // The living landscape: pines, trees, bushes, ferns, grass, flowers, mushrooms, mossy boulders,
 // pebbles and stone edging along the trails, all from the Stylized Nature kit.
 // Each kingdom is its own biome: Kings = green meadow with pines, Warriors = red-orange autumn,
 // Outcasts = dense deep forest with ferns and mushrooms, Monsters = sparse dry land with dead trees.
 // Grass, flowers, ferns, bushes and leaves sway in the wind (stronger in storms).
-// Only what is near you is drawn: the world around the camera is rebuilt as you move, using a few
-// instanced meshes per plant type, so thousands of plants cost only a few dozen draw calls.
+// Tree trunks stop you (see treeState). Only what is near you is drawn: the world around the camera is
+// rebuilt as you move, using a few instanced meshes per plant type, so thousands of plants cost only a
+// few dozen draw calls.
 
 type GroupKey = "tree" | "bush" | "plant" | "grass" | "flower" | "rock" | "mush" | "pebble" | "edgestone";
 
@@ -269,6 +271,7 @@ function kingdomAt(x: number, z: number) {
 
 function rebuild(cx: number, cz: number, pools: Map<GroupKey, Pool>) {
   pools.forEach((pool) => pool.list.forEach((d) => d.parts.forEach((p) => { p.mesh.count = 0; })));
+  TREE_COLLIDERS.length = 0;
 
   pools.forEach((pool, gk) => {
     const g = GROUPS[gk];
@@ -303,10 +306,14 @@ function rebuild(cx: number, cz: number, pools: Map<GroupKey, Pool>) {
         const d = pool.list[k];
         const size = d.spec.size[0] + (d.spec.size[1] - d.spec.size[0]) * r(5);
         const s = size / d.ref;
-        dummy.position.set(x, groundHeight(x, z) - d.minY * s, z);
+        const gy = groundHeight(x, z);
+        dummy.position.set(x, gy - d.minY * s, z);
         dummy.rotation.set(0, r(6) * Math.PI * 2, 0);
         dummy.scale.set(s, s, s);
         dummy.updateMatrix();
+
+        // Tree trunks are solid: thicker for taller trees.
+        if (gk === "tree") TREE_COLLIDERS.push({ x, z, r: 0.45 + 0.035 * size, top: gy + size });
 
         let colour: string | null = null;
         if (d.spec.leaf) {
