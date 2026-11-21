@@ -3,6 +3,7 @@
 import { makeCottages, type Cottage } from "./medieval/houseKit";
 import { SQUARE_BLOCK, computePropColliders, type Solid } from "./medieval/colliders";
 import { VILLAGE_BUILDINGS, OLD_CITY } from "./medieval/mode";
+import { TREE_COLLIDERS } from "./medieval/treeState";
 import { groundHeight } from "./terrain";
 
 export type BuildingType =
@@ -466,6 +467,25 @@ function resolveAgainstBuildings(
       // Corner entry: resolve along the shallower axis.
       if (Math.min(dl, dr) < Math.min(db, df)) x = dl < dr ? minX : maxX;
       else z = db < df ? minZ : maxZ;
+    }
+  }
+
+  // Tree trunks: round obstacles. Push the mover out along the line from the trunk's centre.
+  for (const t of TREE_COLLIDERS) {
+    if (y >= t.top - ROOF_CLEARANCE) continue;
+    const rr = t.r + radius;
+    const dx = x - t.x;
+    const dz = z - t.z;
+    if (dx > rr || dx < -rr || dz > rr || dz < -rr) continue;
+    const d2 = dx * dx + dz * dz;
+    if (d2 >= rr * rr) continue;
+    if (d2 < 1e-6) {
+      x = t.x + rr;
+      z = t.z;
+    } else {
+      const d = Math.sqrt(d2);
+      x = t.x + (dx / d) * rr;
+      z = t.z + (dz / d) * rr;
     }
   }
   return { x, z };
