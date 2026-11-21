@@ -7,6 +7,7 @@ import { pushAlert } from "./alertState";
 import { lowerQuality } from "./quality";
 import { Horses } from "./Horses";
 import { Tunnels } from "./Tunnels";
+import { Haven } from "./Haven";
 
 // The sky itself (blue gradient, clouds, sun) now lives in medieval/SkyDome, mounted by the City.
 // The old purple mountains, the wasteland beyond the map, the cloud banks, the world border and the
@@ -33,9 +34,10 @@ export function Atmosphere() {
 
       <SkyIslands />
 
-      {/* The horses and the tunnels stay even when the graphics are lowered: they are part of getting around. */}
+      {/* The horses, the tunnels and the Haven stay even when the graphics are lowered. */}
       <Horses />
       <Tunnels />
+      <Haven />
 
       {!low && (
         <>
